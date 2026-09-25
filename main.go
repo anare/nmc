@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -18,6 +19,7 @@ type listItem struct {
 }
 
 type panel struct {
+	name  string
 	list  *tview.List
 	path  string
 	items []listItem
@@ -28,7 +30,7 @@ func newPanel(title string) *panel {
 	l.SetBorder(true)
 	l.SetTitle(" " + title + " ")
 	l.SetMainTextColor(tcell.ColorWhite)
-	return &panel{list: l}
+	return &panel{name: title, list: l}
 }
 
 func (p *panel) load(path string, selectIndex int) error {
@@ -140,7 +142,7 @@ func (p *panel) goParentViaList() error {
 }
 
 func (p *panel) updateTitle() {
-	p.list.SetTitle(fmt.Sprintf(" %s ", p.path))
+	p.list.SetTitle(fmt.Sprintf(" %s: %s ", p.name, p.path))
 }
 
 type appState struct {
@@ -149,6 +151,7 @@ type appState struct {
 	active     int
 	status     *tview.TextView
 	escPending bool
+	escAt      time.Time
 }
 
 func (s *appState) setStatus(msg string) {
@@ -185,6 +188,10 @@ func (s *appState) handleEscSequence(event *tcell.EventKey) bool {
 	if !s.escPending {
 		return false
 	}
+	if time.Since(s.escAt) > 700*time.Millisecond {
+		s.escPending = false
+		return false
+	}
 	if event.Key() == tcell.KeyRune {
 		r := event.Rune()
 		if r >= '1' && r <= '9' {
@@ -212,8 +219,9 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 	switch event.Key() {
 	case tcell.KeyESC:
 		s.escPending = true
+		s.escAt = time.Now()
 		s.setStatus("ESC detected: press 1-0 for F1-F10")
-		return nil
+		return event
 	case tcell.KeyTAB:
 		s.switchPanel()
 		return nil
