@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -125,12 +126,14 @@ func (p *panel) goIntoSelected() error {
 	return p.load(item.path, 0)
 }
 
-func (p *panel) goParent() error {
-	parent := filepath.Dir(p.path)
-	if parent == p.path {
-		return nil
+func (p *panel) goParentViaList() error {
+	for i, item := range p.items {
+		if item.name == ".." {
+			p.list.SetCurrentItem(i)
+			return p.goIntoSelected()
+		}
 	}
-	return p.load(parent, 0)
+	return nil
 }
 
 func (p *panel) updateTitle() {
@@ -143,6 +146,7 @@ type appState struct {
 	active     int
 	status     *tview.TextView
 	escPending bool
+	escTimer   *time.Timer
 }
 
 func (s *appState) setStatus(msg string) {
@@ -179,17 +183,28 @@ func (s *appState) handleEscSequence(event *tcell.EventKey) bool {
 	if !s.escPending {
 		return false
 	}
-	s.escPending = false
 	if event.Key() == tcell.KeyRune {
 		r := event.Rune()
 		if r >= '1' && r <= '9' {
+			s.escPending = false
+			if s.escTimer != nil {
+				s.escTimer.Stop()
+			}
 			s.handleFunctionKey(int(r - '0'))
 			return true
 		}
 		if r == '0' {
+			s.escPending = false
+			if s.escTimer != nil {
+				s.escTimer.Stop()
+			}
 			s.handleFunctionKey(10)
 			return true
 		}
+	}
+	s.escPending = false
+	if s.escTimer != nil {
+		s.escTimer.Stop()
 	}
 	return false
 }
@@ -205,7 +220,18 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 	case tcell.KeyESC:
 		s.escPending = true
 		s.setStatus("ESC detected: press 1-0 for F1-F10")
-		return nil
+		if s.escTimer != nil {
+			s.escTimer.Stop()
+		}
+		s.escTimer = time.AfterFunc(700*time.Millisecond, func() {
+			s.app.QueueUpdateDraw(func() {
+				if s.escPending {
+					s.escPending = false
+					s.setStatus("ESC")
+				}
+			})
+		})
+		return event
 	case tcell.KeyTAB:
 		s.switchPanel()
 		return nil
@@ -238,7 +264,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		}
 		return nil
 	case tcell.KeyLeft:
-		if err := a.goParent(); err != nil {
+		if err := a.goParentViaList(); err != nil {
 			s.setStatus("Error: " + err.Error())
 		}
 		return nil
