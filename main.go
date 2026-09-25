@@ -153,6 +153,7 @@ type appState struct {
 	escPending bool
 	escTimer   *time.Timer
 	passEsc    bool
+	escSeq     uint64
 }
 
 func (s *appState) setStatus(msg string) {
@@ -230,13 +231,15 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 			return event
 		}
 		s.escPending = true
+		s.escSeq++
+		seq := s.escSeq
 		s.setStatus("ESC detected: press 1-0 for F1-F10")
 		if s.escTimer != nil {
 			s.escTimer.Stop()
 		}
 		s.escTimer = time.AfterFunc(700*time.Millisecond, func() {
 			s.app.QueueUpdateDraw(func() {
-				if s.escPending {
+				if s.escPending && s.escSeq == seq {
 					s.dispatchStandaloneEsc()
 				}
 			})
@@ -269,18 +272,27 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		}
 		return nil
 	case tcell.KeyRight:
+		target := a.path
+		if item, ok := a.selectedItem(); ok {
+			target = item.path
+		}
 		if err := a.goIntoSelected(); err != nil {
-			s.setStatus("Error: " + err.Error())
+			s.setStatus(fmt.Sprintf("Error opening %s: %v", target, err))
 		}
 		return nil
 	case tcell.KeyLeft:
+		parent := filepath.Dir(a.path)
 		if err := a.goParentViaList(); err != nil {
-			s.setStatus("Error: " + err.Error())
+			s.setStatus(fmt.Sprintf("Error opening %s: %v", parent, err))
 		}
 		return nil
 	case tcell.KeyEnter:
+		target := a.path
+		if item, ok := a.selectedItem(); ok {
+			target = item.path
+		}
 		if err := a.goIntoSelected(); err != nil {
-			s.setStatus("Error: " + err.Error())
+			s.setStatus(fmt.Sprintf("Error opening %s: %v", target, err))
 		}
 		return nil
 	case tcell.KeyF1, tcell.KeyF2, tcell.KeyF3, tcell.KeyF4, tcell.KeyF5,
