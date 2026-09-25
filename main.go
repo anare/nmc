@@ -12,6 +12,8 @@ import (
 	"github.com/rivo/tview"
 )
 
+const escTimeoutRune = '\U0010ffff'
+
 type listItem struct {
 	name  string
 	path  string
@@ -128,6 +130,19 @@ func (p *panel) goIntoSelected() error {
 	if !ok || !item.isDir {
 		return nil
 	}
+	if item.name == ".." {
+		childName := filepath.Base(p.path)
+		if err := p.load(item.path, 0); err != nil {
+			return err
+		}
+		for i, candidate := range p.items {
+			if candidate.name == childName {
+				p.list.SetCurrentItem(i)
+				break
+			}
+		}
+		return nil
+	}
 	return p.load(item.path, 0)
 }
 
@@ -153,11 +168,10 @@ type appState struct {
 	escPending bool
 	escTimer   *time.Timer
 	passEsc    bool
-	escSeq     uint64
 }
 
 func (s *appState) setStatus(msg string) {
-	s.status.SetText(" " + msg)
+	s.status.SetText(" " + tview.Escape(msg))
 }
 
 func (s *appState) activePanel() *panel {
@@ -218,6 +232,13 @@ func (s *appState) handleEscSequence(event *tcell.EventKey) bool {
 }
 
 func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
+	if event.Key() == tcell.KeyRune && event.Rune() == escTimeoutRune {
+		if s.escPending {
+			s.dispatchStandaloneEsc()
+		}
+		return nil
+	}
+
 	if s.handleEscSequence(event) {
 		return nil
 	}
@@ -231,18 +252,12 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 			return event
 		}
 		s.escPending = true
-		s.escSeq++
-		seq := s.escSeq
 		s.setStatus("ESC detected: press 1-0 for F1-F10")
 		if s.escTimer != nil {
 			s.escTimer.Stop()
 		}
 		s.escTimer = time.AfterFunc(700*time.Millisecond, func() {
-			s.app.QueueUpdateDraw(func() {
-				if s.escPending && s.escSeq == seq {
-					s.dispatchStandaloneEsc()
-				}
-			})
+			s.app.QueueEvent(tcell.NewEventKey(tcell.KeyRune, escTimeoutRune, tcell.ModNone))
 		})
 		return nil
 	case tcell.KeyTAB:
