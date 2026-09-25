@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -69,6 +68,7 @@ func (p *panel) load(path string, selectIndex int) error {
 		}
 		p.list.AddItem(display, "", 0, nil)
 	}
+	p.updateTitle()
 
 	if len(p.items) == 0 {
 		return nil
@@ -81,7 +81,6 @@ func (p *panel) load(path string, selectIndex int) error {
 		selectIndex = len(p.items) - 1
 	}
 	p.list.SetCurrentItem(selectIndex)
-	p.updateTitle()
 	return nil
 }
 
@@ -250,7 +249,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyF1, tcell.KeyF2, tcell.KeyF3, tcell.KeyF4, tcell.KeyF5,
 		tcell.KeyF6, tcell.KeyF7, tcell.KeyF8, tcell.KeyF9, tcell.KeyF10:
-		n, _ := strconv.Atoi(strings.TrimPrefix(event.Name(), "F"))
+		n := int(event.Key()-tcell.KeyF1) + 1
 		s.handleFunctionKey(n)
 		return nil
 	}
