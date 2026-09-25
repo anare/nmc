@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -114,7 +113,11 @@ func (p *panel) pageMove(deltaPages int) {
 	if len(p.items) == 0 {
 		return
 	}
-	step := 10
+	_, _, _, height := p.list.GetInnerRect()
+	step := height - 1
+	if step < 1 {
+		step = 1
+	}
 	p.move(step * deltaPages)
 }
 
@@ -146,7 +149,6 @@ type appState struct {
 	active     int
 	status     *tview.TextView
 	escPending bool
-	escTimer   *time.Timer
 }
 
 func (s *appState) setStatus(msg string) {
@@ -187,25 +189,16 @@ func (s *appState) handleEscSequence(event *tcell.EventKey) bool {
 		r := event.Rune()
 		if r >= '1' && r <= '9' {
 			s.escPending = false
-			if s.escTimer != nil {
-				s.escTimer.Stop()
-			}
 			s.handleFunctionKey(int(r - '0'))
 			return true
 		}
 		if r == '0' {
 			s.escPending = false
-			if s.escTimer != nil {
-				s.escTimer.Stop()
-			}
 			s.handleFunctionKey(10)
 			return true
 		}
 	}
 	s.escPending = false
-	if s.escTimer != nil {
-		s.escTimer.Stop()
-	}
 	return false
 }
 
@@ -220,18 +213,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 	case tcell.KeyESC:
 		s.escPending = true
 		s.setStatus("ESC detected: press 1-0 for F1-F10")
-		if s.escTimer != nil {
-			s.escTimer.Stop()
-		}
-		s.escTimer = time.AfterFunc(700*time.Millisecond, func() {
-			s.app.QueueUpdateDraw(func() {
-				if s.escPending {
-					s.escPending = false
-					s.setStatus("ESC")
-				}
-			})
-		})
-		return event
+		return nil
 	case tcell.KeyTAB:
 		s.switchPanel()
 		return nil
@@ -287,7 +269,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 	return event
 }
 
-func main() {
+func run() error {
 	app := tview.NewApplication()
 
 	left := newPanel("Left")
@@ -295,14 +277,14 @@ func main() {
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	if err := left.load(cwd, 0); err != nil {
-		panic(err)
+		return err
 	}
 	if err := right.load(cwd, 0); err != nil {
-		panic(err)
+		return err
 	}
 
 	status := tview.NewTextView().
@@ -329,7 +311,12 @@ func main() {
 	state.stylePanels()
 
 	app.SetInputCapture(state.keyHandler)
-	if err := app.SetRoot(root, true).SetFocus(left.list).Run(); err != nil {
-		panic(err)
+	return app.SetRoot(root, true).SetFocus(left.list).Run()
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "nmc failed:", err)
+		os.Exit(1)
 	}
 }
