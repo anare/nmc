@@ -151,7 +151,8 @@ type appState struct {
 	active     int
 	status     *tview.TextView
 	escPending bool
-	escAt      time.Time
+	escTimer   *time.Timer
+	passEsc    bool
 }
 
 func (s *appState) setStatus(msg string) {
@@ -184,13 +185,19 @@ func (s *appState) handleFunctionKey(num int) {
 	s.setStatus(fmt.Sprintf("F%d pressed", num))
 }
 
+func (s *appState) dispatchStandaloneEsc() {
+	s.escPending = false
+	s.passEsc = true
+	s.setStatus("ESC")
+	s.app.QueueEvent(tcell.NewEventKey(tcell.KeyESC, 0, tcell.ModNone))
+}
+
 func (s *appState) handleEscSequence(event *tcell.EventKey) bool {
 	if !s.escPending {
 		return false
 	}
-	if time.Since(s.escAt) > 700*time.Millisecond {
-		s.escPending = false
-		return false
+	if s.escTimer != nil {
+		s.escTimer.Stop()
 	}
 	if event.Key() == tcell.KeyRune {
 		r := event.Rune()
@@ -205,7 +212,7 @@ func (s *appState) handleEscSequence(event *tcell.EventKey) bool {
 			return true
 		}
 	}
-	s.escPending = false
+	s.dispatchStandaloneEsc()
 	return false
 }
 
@@ -218,10 +225,23 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 
 	switch event.Key() {
 	case tcell.KeyESC:
+		if s.passEsc {
+			s.passEsc = false
+			return event
+		}
 		s.escPending = true
-		s.escAt = time.Now()
 		s.setStatus("ESC detected: press 1-0 for F1-F10")
-		return event
+		if s.escTimer != nil {
+			s.escTimer.Stop()
+		}
+		s.escTimer = time.AfterFunc(700*time.Millisecond, func() {
+			s.app.QueueUpdateDraw(func() {
+				if s.escPending {
+					s.dispatchStandaloneEsc()
+				}
+			})
+		})
+		return nil
 	case tcell.KeyTAB:
 		s.switchPanel()
 		return nil
