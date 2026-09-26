@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -460,8 +461,8 @@ type appState struct {
 	passEsc    bool
 	shellCmd   *exec.Cmd
 	shellIn    io.WriteCloser
+	shellPTY   *os.File
 	shellView  *tview.TextView
-	shellInput *tview.InputField
 	shellMu    sync.Mutex
 	cmdInput   *tview.InputField
 }
@@ -489,7 +490,43 @@ func (s *appState) executeCommandLine() {
 		s.setError("Command", raw, err)
 		return
 	}
+	s.applyCommandLineEffects(raw)
 	s.setStatus("Command sent: " + strings.TrimSpace(raw))
+}
+
+func (s *appState) applyCommandLineEffects(raw string) {
+	parts, err := splitCommandLine(strings.TrimSpace(raw))
+	if err != nil || len(parts) == 0 {
+		return
+	}
+	if parts[0] != "cd" {
+		return
+	}
+	target := ""
+	if len(parts) == 1 || strings.TrimSpace(parts[1]) == "" {
+		target = os.Getenv("HOME")
+	} else {
+		target = parts[1]
+	}
+	if strings.HasPrefix(target, "~") {
+		home := os.Getenv("HOME")
+		if home != "" {
+			if target == "~" {
+				target = home
+			} else if strings.HasPrefix(target, "~/") {
+				target = filepath.Join(home, strings.TrimPrefix(target, "~/"))
+			}
+		}
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(s.activePanel().path, target)
+	}
+	if err := s.activePanel().load(target, 0, true); err != nil {
+		s.setError("cd", target, err)
+		return
+	}
+	s.stylePanels()
+	s.updateInfoStatus()
 }
 
 func (s *appState) syncShellCwd(path string) {
@@ -660,25 +697,14 @@ func (s *appState) startShell() error {
 	if s.activePanel() != nil {
 		cmd.Dir = s.activePanel().path
 	}
-	stdin, err := cmd.StdinPipe()
+	tty, err := pty.Start(cmd)
 	if err != nil {
-		return err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
 		return err
 	}
 	s.shellCmd = cmd
-	s.shellIn = stdin
-	go s.streamShellOutput(stdout)
-	go s.streamShellOutput(stderr)
+	s.shellIn = tty
+	s.shellPTY = tty
+	go s.streamShellOutput(tty)
 	return nil
 }
 
@@ -748,6 +774,42 @@ func (s *appState) streamShellOutput(r io.Reader) {
 	}
 }
 
+func (s *appState) writeShellKey(event *tcell.EventKey) {
+	if s.shellIn == nil || event == nil {
+		return
+	}
+	write := func(text string) {
+		_, _ = io.WriteString(s.shellIn, text)
+	}
+	if event.Key() == tcell.KeyRune {
+		write(string(event.Rune()))
+		return
+	}
+	switch event.Key() {
+	case tcell.KeyEnter:
+		write("\r")
+	case tcell.KeyTab:
+		write("\t")
+	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		write("\x7f")
+	case tcell.KeyUp:
+		write("\x1b[A")
+	case tcell.KeyDown:
+		write("\x1b[B")
+	case tcell.KeyRight:
+		write("\x1b[C")
+	case tcell.KeyLeft:
+		write("\x1b[D")
+	case tcell.KeyEscape:
+		write("\x1b")
+	default:
+		if event.Key() >= tcell.KeyCtrlA && event.Key() <= tcell.KeyCtrlZ {
+			ctrl := byte(event.Key()-tcell.KeyCtrlA) + 1
+			_, _ = s.shellIn.Write([]byte{ctrl})
+		}
+	}
+}
+
 func (s *appState) showShellPage() {
 	if s.shellView == nil {
 		s.shellView = tview.NewTextView().
@@ -758,46 +820,21 @@ func (s *appState) showShellPage() {
 		s.shellView.SetTitle(" Shell (Ctrl+O to return) ")
 		s.shellView.SetBackgroundColor(mcDialogBackground)
 		s.shellView.SetBorderColor(mcAccent)
-		s.shellInput = tview.NewInputField().SetLabel("$ ")
-		s.shellInput.SetFieldBackgroundColor(mcPanelBackground)
-		s.shellInput.SetFieldTextColor(tcell.ColorWhite)
-		s.shellInput.SetLabelColor(tcell.ColorWhite)
-		s.shellInput.SetDoneFunc(func(key tcell.Key) {
-			switch key {
-			case tcell.KeyEnter:
-				cmd := strings.TrimSpace(s.shellInput.GetText())
-				s.shellInput.SetText("")
-				if cmd != "" {
-					s.appendShellOutput("$ " + cmd + "\n")
-					if s.shellIn != nil {
-						_, _ = io.WriteString(s.shellIn, cmd+"\n")
-					}
-				}
-			case tcell.KeyCtrlO, tcell.KeyEsc:
-				s.closeOverlay("shell")
-			}
-		})
-		layout := tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(s.shellView, 0, 1, false).
-			AddItem(s.shellInput, 1, 0, true)
-		layout.SetBorder(true)
-		layout.SetTitle(" Parallel Shell ")
-		layout.SetBorderColor(mcAccent)
-		layout.SetBackgroundColor(mcDialogBackground)
-		layout.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		s.shellView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 			if event.Key() == tcell.KeyCtrlO {
 				s.closeOverlay("shell")
 				return nil
 			}
-			return event
+			s.writeShellKey(event)
+			return nil
 		})
-		s.pages.AddPage("shell", layout, true, false)
-		s.appendShellOutput("Shell preloaded. Type commands and press Enter.\n")
+		s.pages.AddPage("shell", s.shellView, true, false)
+		s.appendShellOutput("Shell preloaded. Ctrl+O to return to panels.\n")
 	}
 	s.resetEscState()
 	s.pages.ShowPage("shell")
 	s.pages.SwitchToPage("shell")
-	s.app.SetFocus(s.shellInput)
+	s.app.SetFocus(s.shellView)
 }
 
 func (s *appState) toggleShellPage() {
@@ -1568,6 +1605,10 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		}
 		return nil
 	case tcell.KeyRight, tcell.KeyEnter:
+		if event.Key() == tcell.KeyEnter && s.cmdInput != nil && strings.TrimSpace(s.cmdInput.GetText()) != "" {
+			s.executeCommandLine()
+			return nil
+		}
 		s.openSelected()
 		return nil
 	case tcell.KeyLeft:
@@ -1715,8 +1756,8 @@ func run() error {
 	root := tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(panels, 0, 1, true).
-		AddItem(status, 3, 0, false).
-		AddItem(cmdInput, 3, 0, false)
+		AddItem(cmdInput, 3, 0, false).
+		AddItem(status, 3, 0, false)
 
 	pages := tview.NewPages().
 		AddPage("main", root, true, true)
