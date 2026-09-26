@@ -665,7 +665,16 @@ func defaultUserShell() string {
 	if _, err := os.Stat("/bin/bash"); err == nil {
 		return "/bin/bash"
 	}
-	return "/bin/sh"
+	if _, err := os.Stat("/bin/sh"); err == nil {
+		return "/bin/sh"
+	}
+	if p, err := exec.LookPath("bash"); err == nil {
+		return p
+	}
+	if p, err := exec.LookPath("sh"); err == nil {
+		return p
+	}
+	return "sh"
 }
 
 func shellFromPasswd(uid string, r io.Reader) string {
@@ -1089,9 +1098,11 @@ func copyFile(src, dst string, mode os.FileMode) error {
 
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
+		_ = os.Remove(dst)
 		return err
 	}
 	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
 		return err
 	}
 	return nil
@@ -1166,35 +1177,24 @@ func movePath(src, dst string) error {
 	if err := copyPath(src, tmpDst); err != nil {
 		return err
 	}
-	var backupDst string
-	if _, err := os.Lstat(dst); err == nil {
-		backupDst = fmt.Sprintf("%s.nmc-backup-%d", dst, time.Now().UnixNano())
-		if err := os.Rename(dst, backupDst); err != nil {
-			_ = os.RemoveAll(tmpDst)
-			return err
-		}
-	} else if !os.IsNotExist(err) {
-		_ = os.RemoveAll(tmpDst)
-		return err
-	}
 	if err := os.Rename(tmpDst, dst); err != nil {
 		_ = os.RemoveAll(tmpDst)
-		if backupDst != "" {
-			_ = os.Rename(backupDst, dst)
-		}
 		return err
-	}
-	if backupDst != "" {
-		_ = os.RemoveAll(backupDst)
 	}
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
 	}
 	if info.IsDir() {
-		return os.RemoveAll(src)
+		if err := os.RemoveAll(src); err != nil {
+			return fmt.Errorf("move completed but failed to remove source: %w", err)
+		}
+		return nil
 	}
-	return os.Remove(src)
+	if err := os.Remove(src); err != nil {
+		return fmt.Errorf("move completed but failed to remove source: %w", err)
+	}
+	return nil
 }
 
 func isCrossDeviceRenameError(err error) bool {
@@ -1527,10 +1527,6 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		}
 		return nil
 	case tcell.KeyRight, tcell.KeyEnter:
-		if event.Key() == tcell.KeyEnter && s.cmdInput != nil && strings.TrimSpace(s.cmdInput.GetText()) != "" {
-			s.executeCommandLine()
-			return nil
-		}
 		s.openSelected()
 		return nil
 	case tcell.KeyLeft:

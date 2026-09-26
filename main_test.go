@@ -183,10 +183,13 @@ func TestPanelSortModesKeepParentFirst(t *testing.T) {
 	root := t.TempDir()
 	a := filepath.Join(root, "a.txt")
 	b := filepath.Join(root, "b.go")
+	c := filepath.Join(root, "c.go")
 	_ = os.WriteFile(a, []byte("12345"), 0o644)
 	_ = os.WriteFile(b, []byte("1"), 0o644)
+	_ = os.WriteFile(c, []byte("2"), 0o644)
 	_ = os.Chtimes(a, time.Unix(100, 0), time.Unix(100, 0))
 	_ = os.Chtimes(b, time.Unix(200, 0), time.Unix(200, 0))
+	_ = os.Chtimes(c, time.Unix(200, 0), time.Unix(200, 0))
 
 	p := newPanel("Test")
 	p.sortMode = sortByName
@@ -204,6 +207,9 @@ func TestPanelSortModesKeepParentFirst(t *testing.T) {
 	if p.items[0].name != ".." {
 		t.Fatalf("expected parent first for ext sort")
 	}
+	if p.items[1].name != "b.go" || p.items[2].name != "c.go" {
+		t.Fatalf("expected ext ties sorted by name")
+	}
 
 	p.sortMode = sortByTime
 	if err := p.load(root, 0, false); err != nil {
@@ -212,6 +218,9 @@ func TestPanelSortModesKeepParentFirst(t *testing.T) {
 	if p.items[0].name != ".." || p.items[1].name != "b.go" {
 		t.Fatalf("expected newest first for time sort")
 	}
+	if p.items[1].name != "b.go" || p.items[2].name != "c.go" {
+		t.Fatalf("expected time ties sorted by name")
+	}
 
 	p.sortMode = sortBySize
 	if err := p.load(root, 0, false); err != nil {
@@ -219,5 +228,8 @@ func TestPanelSortModesKeepParentFirst(t *testing.T) {
 	}
 	if p.items[0].name != ".." || p.items[1].name != "a.txt" {
 		t.Fatalf("expected largest first for size sort")
+	}
+	if p.items[2].name != "b.go" || p.items[3].name != "c.go" {
+		t.Fatalf("expected size ties sorted by name")
 	}
 }
