@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -397,17 +399,16 @@ func (p *panel) updateTitle() {
 }
 
 type appState struct {
-	app          *tview.Application
-	pages        *tview.Pages
-	panels       [2]*panel
-	active       int
-	status       *tview.TextView
-	escPending   bool
-	escTimer     *time.Timer
-	passEsc      bool
-	searchQuery  string
-	searchTimer  *time.Timer
-	overlayDepth int
+	app         *tview.Application
+	pages       *tview.Pages
+	panels      [2]*panel
+	active      int
+	status      *tview.TextView
+	escPending  bool
+	escTimer    *time.Timer
+	passEsc     bool
+	searchQuery string
+	searchTimer *time.Timer
 }
 
 func (s *appState) setStatus(msg string) {
@@ -498,22 +499,19 @@ func (s *appState) handleFunctionKey(num int) {
 
 func (s *appState) closeOverlay(name string) {
 	s.pages.RemovePage(name)
-	if s.overlayDepth > 0 {
-		s.overlayDepth--
-	}
 	s.resetEscState()
 	s.app.SetFocus(s.activePanel().list)
 }
 
 func (s *appState) showOverlay(name string, primitive tview.Primitive, focus tview.Primitive) {
 	s.resetEscState()
-	s.overlayDepth++
 	s.pages.AddAndSwitchToPage(name, primitive, true)
 	s.app.SetFocus(focus)
 }
 
 func (s *appState) overlayVisible() bool {
-	return s.overlayDepth > 0
+	name, _ := s.pages.GetFrontPage()
+	return name != "main"
 }
 
 func (s *appState) resetEscState() {
@@ -649,12 +647,12 @@ func (s *appState) viewSelected() {
 	s.showText("Viewer: "+item.path, body)
 }
 
-func shellSplit(command string) []string {
-	parts := strings.Fields(strings.TrimSpace(command))
-	if len(parts) == 0 {
-		return nil
-	}
-	return parts
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func cmdQuote(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
 }
 
 func runExternal(command string, args ...string) error {
@@ -676,14 +674,13 @@ func (s *appState) editSelected() {
 	if strings.TrimSpace(editor) == "" {
 		editor = "vi"
 	}
-	parts := shellSplit(editor)
-	if len(parts) == 0 {
-		s.setStatus("Invalid EDITOR")
-		return
-	}
 	var cmdErr error
 	s.app.Suspend(func() {
-		cmdErr = runExternal(parts[0], append(parts[1:], item.path)...)
+		if runtime.GOOS == "windows" {
+			cmdErr = runExternal("cmd", "/c", editor+" "+cmdQuote(item.path))
+			return
+		}
+		cmdErr = runExternal("sh", "-c", editor+" "+shellSingleQuote(item.path))
 	})
 	if cmdErr != nil {
 		s.setError("Edit", item.path, cmdErr)
@@ -740,12 +737,15 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
 		return err
 	}
-	return out.Close()
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func copyPath(src, dst string) error {
@@ -784,6 +784,11 @@ func copyPath(src, dst string) error {
 func movePath(src, dst string) error {
 	if err := os.Rename(src, dst); err == nil {
 		return nil
+	} else {
+		var linkErr *os.LinkError
+		if !errors.As(err, &linkErr) || !errors.Is(linkErr.Err, syscall.EXDEV) {
+			return err
+		}
 	}
 	if err := copyPath(src, dst); err != nil {
 		return err
