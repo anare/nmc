@@ -647,14 +647,6 @@ func (s *appState) viewSelected() {
 	s.showText("Viewer: "+item.path, body)
 }
 
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-func cmdQuote(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
-}
-
 func splitCommandLine(command string) ([]string, error) {
 	var parts []string
 	var current strings.Builder
@@ -694,11 +686,16 @@ func splitCommandLine(command string) ([]string, error) {
 	return parts, nil
 }
 
-func runExternal(command string, args ...string) error {
+func runExternalAttached(command string, args ...string) error {
 	cmd := exec.Command(command, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func runExternalDetached(command string, args ...string) error {
+	cmd := exec.Command(command, args...)
 	return cmd.Run()
 }
 
@@ -720,7 +717,7 @@ func (s *appState) editSelected() {
 	}
 	var cmdErr error
 	s.app.Suspend(func() {
-		cmdErr = runExternal(parts[0], append(parts[1:], item.path)...)
+		cmdErr = runExternalAttached(parts[0], append(parts[1:], item.path)...)
 	})
 	if cmdErr != nil {
 		s.setError("Edit", item.path, cmdErr)
@@ -733,11 +730,11 @@ func (s *appState) editSelected() {
 func openFileDefault(path string) error {
 	switch runtime.GOOS {
 	case "darwin":
-		return runExternal("open", path)
+		return runExternalDetached("open", path)
 	case "windows":
-		return runExternal("rundll32", "url.dll,FileProtocolHandler", path)
+		return runExternalDetached("rundll32", "url.dll,FileProtocolHandler", path)
 	default:
-		return runExternal("xdg-open", path)
+		return runExternalDetached("xdg-open", path)
 	}
 }
 
@@ -755,11 +752,7 @@ func (s *appState) openSelected() {
 		s.updateInfoStatus()
 		return
 	}
-	var cmdErr error
-	s.app.Suspend(func() {
-		cmdErr = openFileDefault(item.path)
-	})
-	if cmdErr != nil {
+	if cmdErr := openFileDefault(item.path); cmdErr != nil {
 		s.setError("Launch", item.path, cmdErr)
 		return
 	}
@@ -793,21 +786,21 @@ func copyPath(src, dst string) error {
 	if err != nil {
 		return err
 	}
+	if dstInfo, statErr := os.Lstat(dst); statErr == nil {
+		if dstInfo.IsDir() && dstInfo.Mode()&os.ModeSymlink == 0 {
+			if err := os.RemoveAll(dst); err != nil {
+				return err
+			}
+		} else if err := os.Remove(dst); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, linkErr := os.Readlink(src)
 		if linkErr != nil {
 			return linkErr
-		}
-		if dstInfo, statErr := os.Lstat(dst); statErr == nil {
-			if dstInfo.IsDir() && dstInfo.Mode()&os.ModeSymlink == 0 {
-				if err := os.RemoveAll(dst); err != nil {
-					return err
-				}
-			} else if err := os.Remove(dst); err != nil {
-				return err
-			}
-		} else if !os.IsNotExist(statErr) {
-			return statErr
 		}
 		return os.Symlink(target, dst)
 	}
@@ -835,8 +828,7 @@ func movePath(src, dst string) error {
 	if err := os.Rename(src, dst); err == nil {
 		return nil
 	} else {
-		var linkErr *os.LinkError
-		if !errors.As(err, &linkErr) || !errors.Is(linkErr.Err, syscall.EXDEV) {
+		if !isCrossDeviceRenameError(err) {
 			return err
 		}
 	}
@@ -862,6 +854,20 @@ func movePath(src, dst string) error {
 		return os.RemoveAll(src)
 	}
 	return os.Remove(src)
+}
+
+func isCrossDeviceRenameError(err error) bool {
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) && errors.Is(linkErr.Err, syscall.EXDEV) {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "not same device") || strings.Contains(msg, "cross-device") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *appState) copySelected() {
