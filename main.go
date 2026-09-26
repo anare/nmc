@@ -656,27 +656,34 @@ func defaultUserShell() string {
 		return shell
 	}
 	uid := strconv.Itoa(os.Getuid())
-	passwd, err := os.ReadFile("/etc/passwd")
-	if err == nil {
-		scanner := bufio.NewScanner(strings.NewReader(string(passwd)))
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
-				continue
-			}
-			parts := strings.Split(line, ":")
-			if len(parts) < 7 {
-				continue
-			}
-			if parts[2] == uid && strings.TrimSpace(parts[6]) != "" {
-				return strings.TrimSpace(parts[6])
-			}
+	if f, err := os.Open("/etc/passwd"); err == nil {
+		defer f.Close()
+		if shell := shellFromPasswd(uid, f); shell != "" {
+			return shell
 		}
 	}
 	if _, err := os.Stat("/bin/bash"); err == nil {
 		return "/bin/bash"
 	}
 	return "/bin/sh"
+}
+
+func shellFromPasswd(uid string, r io.Reader) string {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.Split(line, ":")
+		if len(parts) < 7 {
+			continue
+		}
+		if parts[2] == uid && strings.TrimSpace(parts[6]) != "" {
+			return strings.TrimSpace(parts[6])
+		}
+	}
+	return ""
 }
 
 func (s *appState) streamShellOutput(r io.Reader) {
@@ -1028,6 +1035,27 @@ func openFileDefault(path string) error {
 
 func (s *appState) openSelected() {
 	a := s.activePanel()
+	targets := a.selectedPaths()
+	if len(targets) > 1 {
+		launched := 0
+		for _, path := range targets {
+			info, err := os.Lstat(path)
+			if err != nil {
+				s.setError("Launch", path, err)
+				return
+			}
+			if info.IsDir() {
+				continue
+			}
+			if cmdErr := openFileDefault(path); cmdErr != nil {
+				s.setError("Launch", path, cmdErr)
+				return
+			}
+			launched++
+		}
+		s.setStatus(fmt.Sprintf("Launched %d file(s)", launched))
+		return
+	}
 	item, ok := a.selectedItem()
 	if !ok {
 		return
@@ -1115,6 +1143,11 @@ func copyPath(src, dst string) error {
 func movePath(src, dst string) error {
 	if pathsEqual(src, dst) {
 		return fmt.Errorf("source and destination are identical")
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("destination already exists: %s", dst)
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	if srcInfo, err := os.Lstat(src); err == nil && srcInfo.IsDir() && isPathInside(src, dst) {
 		return fmt.Errorf("destination is inside source")
@@ -1235,7 +1268,7 @@ func (s *appState) makeDirectory() {
 			s.setStatus("F7 canceled")
 			return
 		}
-		if name == "." || name == ".." || filepath.Base(name) != name || strings.Contains(name, "/") || strings.Contains(name, `\`) {
+		if name == "." || name == ".." || filepath.Base(name) != name || strings.Contains(name, string(os.PathSeparator)) || (runtime.GOOS == "windows" && strings.Contains(name, "/")) {
 			s.setStatus("F7 requires a single directory name")
 			return
 		}
