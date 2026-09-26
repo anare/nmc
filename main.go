@@ -561,13 +561,14 @@ func (s *appState) showConfirm(title, msg string, onYes func()) {
 func (s *appState) showInput(title, label, initial string, onOK func(string)) {
 	name := fmt.Sprintf("input-%d", time.Now().UnixNano())
 	input := tview.NewInputField().SetLabel(label).SetText(initial)
+	submit := func() {
+		value := strings.TrimSpace(input.GetText())
+		s.closeOverlay(name)
+		onOK(value)
+	}
 	form := tview.NewForm().
 		AddFormItem(input).
-		AddButton("OK", func() {
-			value := strings.TrimSpace(input.GetText())
-			s.closeOverlay(name)
-			onOK(value)
-		}).
+		AddButton("OK", submit).
 		AddButton("Cancel", func() {
 			s.closeOverlay(name)
 		})
@@ -582,6 +583,14 @@ func (s *appState) showInput(title, label, initial string, onOK func(string)) {
 			return nil
 		}
 		return event
+	})
+	input.SetDoneFunc(func(key tcell.Key) {
+		switch key {
+		case tcell.KeyEnter:
+			submit()
+		case tcell.KeyESC:
+			s.closeOverlay(name)
+		}
 	})
 	input.SetFieldBackgroundColor(mcPanelBackground)
 	input.SetFieldTextColor(tcell.ColorWhite)
@@ -634,14 +643,17 @@ func (s *appState) viewSelected() {
 		return
 	}
 	defer f.Close()
-	buf := make([]byte, maxViewSize)
-	n, readErr := f.Read(buf)
-	if readErr != nil && readErr != io.EOF {
+	content, readErr := io.ReadAll(io.LimitReader(f, maxViewSize+1))
+	if readErr != nil {
 		s.setError("View", item.path, readErr)
 		return
 	}
-	body := string(buf[:n])
-	if n == maxViewSize {
+	truncated := len(content) > maxViewSize
+	if truncated {
+		content = content[:maxViewSize]
+	}
+	body := string(content)
+	if truncated {
 		body += "\n\n[truncated]"
 	}
 	s.showText("Viewer: "+item.path, body)
@@ -696,7 +708,26 @@ func runExternalAttached(command string, args ...string) error {
 
 func runExternalDetached(command string, args ...string) error {
 	cmd := exec.Command(command, args...)
-	return cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
+func isPathInside(base, candidate string) bool {
+	baseAbs, baseErr := filepath.Abs(base)
+	candidateAbs, candidateErr := filepath.Abs(candidate)
+	if baseErr != nil || candidateErr != nil {
+		return false
+	}
+	rel, err := filepath.Rel(baseAbs, candidateAbs)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
 }
 
 func (s *appState) editSelected() {
@@ -786,6 +817,9 @@ func copyPath(src, dst string) error {
 	if err != nil {
 		return err
 	}
+	if info.IsDir() && isPathInside(src, dst) {
+		return fmt.Errorf("destination is inside source")
+	}
 	if dstInfo, statErr := os.Lstat(dst); statErr == nil {
 		if dstInfo.IsDir() && dstInfo.Mode()&os.ModeSymlink == 0 {
 			if err := os.RemoveAll(dst); err != nil {
@@ -825,6 +859,9 @@ func copyPath(src, dst string) error {
 }
 
 func movePath(src, dst string) error {
+	if isPathInside(src, dst) {
+		return fmt.Errorf("destination is inside source")
+	}
 	if err := os.Rename(src, dst); err == nil {
 		return nil
 	} else {
