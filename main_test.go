@@ -107,6 +107,14 @@ func TestEscSequenceTimeoutAndFunctionMapping(t *testing.T) {
 	}
 }
 
+func TestEscArmsTimeoutTimer(t *testing.T) {
+	s := newTestState(t)
+	_ = s.keyHandler(tcell.NewEventKey(tcell.KeyESC, 0, tcell.ModNone))
+	if s.escTimer == nil {
+		t.Fatalf("expected esc timer to be armed after ESC")
+	}
+}
+
 func TestCopyMoveDirectoryDestinationGuards(t *testing.T) {
 	t.Run("copy rejects descendant destination", func(t *testing.T) {
 		root := t.TempDir()

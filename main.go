@@ -465,6 +465,7 @@ type appState struct {
 	shellPTY   *os.File
 	shellView  *tview.TextView
 	shellMu    sync.Mutex
+	shellGone  bool
 	cmdInput   *tview.InputField
 }
 
@@ -481,12 +482,13 @@ func (s *appState) executeCommandLine() {
 		return
 	}
 	s.cmdInput.SetText("")
-	if s.shellIn == nil {
+	w := s.currentShellWriter()
+	if w == nil {
 		s.setStatus("Shell is not available")
 		return
 	}
 	s.appendShellOutput("$ " + raw + "\n")
-	_, err := io.WriteString(s.shellIn, raw+"\n")
+	_, err := io.WriteString(w, raw+"\n")
 	if err != nil {
 		s.setError("Command", raw, err)
 		return
@@ -496,9 +498,6 @@ func (s *appState) executeCommandLine() {
 }
 
 func (s *appState) applyCommandLineEffects(raw string) {
-	if strings.ContainsAny(raw, "|&;`$()<>") {
-		return
-	}
 	parts, err := splitCommandLine(strings.TrimSpace(raw))
 	if err != nil || len(parts) == 0 {
 		return
@@ -534,14 +533,21 @@ func (s *appState) applyCommandLineEffects(raw string) {
 }
 
 func (s *appState) syncShellCwd(path string) {
-	if s.shellIn == nil || strings.TrimSpace(path) == "" {
+	w := s.currentShellWriter()
+	if w == nil || strings.TrimSpace(path) == "" {
 		return
 	}
 	if runtime.GOOS == "windows" {
-		_, _ = io.WriteString(s.shellIn, "cd /d "+strconv.Quote(path)+"\n")
+		_, _ = io.WriteString(w, "cd /d "+strconv.Quote(path)+"\n")
 		return
 	}
-	_, _ = io.WriteString(s.shellIn, "cd "+shellQuotePOSIX(path)+"\n")
+	_, _ = io.WriteString(w, "cd "+shellQuotePOSIX(path)+"\n")
+}
+
+func (s *appState) currentShellWriter() io.WriteCloser {
+	s.shellMu.Lock()
+	defer s.shellMu.Unlock()
+	return s.shellIn
 }
 
 func (s *appState) appendCommandRune(r rune) {
@@ -708,15 +714,24 @@ func (s *appState) startShell() error {
 		}
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
+			_ = stdin.Close()
 			return err
 		}
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
+			_ = stdin.Close()
+			_ = stdout.Close()
 			return err
 		}
 		if err := cmd.Start(); err != nil {
+			_ = stdin.Close()
+			_ = stdout.Close()
+			_ = stderr.Close()
 			return err
 		}
+		s.shellMu.Lock()
+		s.shellGone = false
+		s.shellMu.Unlock()
 		s.shellCmd = cmd
 		s.shellIn = stdin
 		go s.streamShellOutput(stdout)
@@ -730,6 +745,7 @@ func (s *appState) startShell() error {
 	s.shellCmd = cmd
 	s.shellIn = tty
 	s.shellPTY = tty
+	s.shellGone = false
 	go s.streamShellOutput(tty)
 	return nil
 }
@@ -795,25 +811,38 @@ func (s *appState) streamShellOutput(r io.Reader) {
 			})
 		}
 		if err != nil {
-			s.shellMu.Lock()
-			s.shellIn = nil
-			s.shellPTY = nil
-			s.shellCmd = nil
-			s.shellMu.Unlock()
-			s.app.QueueUpdateDraw(func() {
-				s.appendShellOutput("\n[red]shell exited[-]\n")
-			})
+			s.markShellExited()
 			return
 		}
 	}
 }
 
+func (s *appState) markShellExited() {
+	s.shellMu.Lock()
+	if s.shellGone {
+		s.shellMu.Unlock()
+		return
+	}
+	s.shellGone = true
+	s.shellIn = nil
+	s.shellPTY = nil
+	s.shellCmd = nil
+	s.shellMu.Unlock()
+	s.app.QueueUpdateDraw(func() {
+		s.appendShellOutput("\n[red]shell exited[-]\n")
+	})
+}
+
 func (s *appState) writeShellKey(event *tcell.EventKey) {
-	if s.shellIn == nil || event == nil {
+	if event == nil {
+		return
+	}
+	w := s.currentShellWriter()
+	if w == nil {
 		return
 	}
 	write := func(text string) {
-		_, _ = io.WriteString(s.shellIn, text)
+		_, _ = io.WriteString(w, text)
 	}
 	if event.Key() == tcell.KeyRune {
 		write(string(event.Rune()))
@@ -839,7 +868,7 @@ func (s *appState) writeShellKey(event *tcell.EventKey) {
 	default:
 		if event.Key() >= tcell.KeyCtrlA && event.Key() <= tcell.KeyCtrlZ {
 			ctrl := byte(event.Key()-tcell.KeyCtrlA) + 1
-			_, _ = s.shellIn.Write([]byte{ctrl})
+			_, _ = w.Write([]byte{ctrl})
 		}
 	}
 }
