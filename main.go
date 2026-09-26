@@ -62,6 +62,7 @@ type listItem struct {
 	size    int64
 	modTime time.Time
 	ext     string
+	mode    os.FileMode
 }
 
 type panel struct {
@@ -78,6 +79,7 @@ type panel struct {
 
 func newPanel(title string) *panel {
 	l := tview.NewList().ShowSecondaryText(false)
+	l.SetUseStyleTags(true, false)
 	l.SetBorder(true)
 	l.SetTitle(" " + title + " ")
 	l.SetBackgroundColor(mcPanelBackground)
@@ -144,6 +146,7 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 			size:    info.Size(),
 			modTime: info.ModTime(),
 			ext:     strings.ToLower(filepath.Ext(name)),
+			mode:    info.Mode(),
 		})
 	}
 
@@ -189,15 +192,7 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 
 	p.list.Clear()
 	for _, item := range p.items {
-		prefix := "   "
-		if p.marked[item.path] {
-			prefix = " * "
-		}
-		display := item.name
-		if item.isDir && item.name != ".." {
-			display += "/"
-		}
-		p.list.AddItem(prefix+display, "", 0, nil)
+		p.list.AddItem(p.renderItem(item), "", 0, nil)
 	}
 	p.updateTitle()
 
@@ -212,6 +207,52 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 	}
 	p.list.SetCurrentItem(selectIndex)
 	return nil
+}
+
+func (p *panel) renderItem(item listItem) string {
+	mark := " "
+	if p.marked[item.path] {
+		mark = "[yellow::b]*[-:-:-]"
+	}
+	if item.name == ".." {
+		return fmt.Sprintf("%s [#7fb3ff::b]drwxr-xr-x[-:-:-] %10s %s %s", mark, "-", "-", "[#a6c8ff::b]../[-:-:-]")
+	}
+	size := fmt.Sprintf("%d", item.size)
+	if item.isDir {
+		size = "-"
+	}
+	modified := item.modTime.Format("2006-01-02 15:04")
+	return fmt.Sprintf("%s %s %10s %s %s", mark, item.mode.String(), size, modified, colorizeName(item, p.marked[item.path]))
+}
+
+func colorizeName(item listItem, marked bool) string {
+	name := item.name
+	if marked {
+		if item.isDir && item.name != ".." {
+			name += "/"
+		}
+		return fmt.Sprintf("[yellow::b]%s[-:-:-]", tview.Escape(name))
+	}
+	if item.isDir {
+		if item.name != ".." {
+			name += "/"
+		}
+		return fmt.Sprintf("[#89d1ff::b]%s[-:-:-]", tview.Escape(name))
+	}
+	switch item.ext {
+	case ".go":
+		return fmt.Sprintf("[#7cffb2::b]%s[-:-:-]", tview.Escape(name))
+	case ".md", ".txt":
+		return fmt.Sprintf("[#e8e8e8]%s[-:-:-]", tview.Escape(name))
+	case ".json", ".yaml", ".yml", ".toml":
+		return fmt.Sprintf("[#ffd27f]%s[-:-:-]", tview.Escape(name))
+	case ".sh", ".bash", ".zsh":
+		return fmt.Sprintf("[#ff9fd4::b]%s[-:-:-]", tview.Escape(name))
+	case ".jpg", ".jpeg", ".png", ".gif", ".svg":
+		return fmt.Sprintf("[#c8a8ff]%s[-:-:-]", tview.Escape(name))
+	default:
+		return fmt.Sprintf("[#d7e7ff]%s[-:-:-]", tview.Escape(name))
+	}
 }
 
 func (p *panel) refresh() error {
@@ -416,10 +457,51 @@ type appState struct {
 	shellView   *tview.TextView
 	shellInput  *tview.InputField
 	shellMu     sync.Mutex
+	cmdInput    *tview.InputField
 }
 
 func (s *appState) setStatus(msg string) {
 	s.status.SetText(" " + tview.Escape(msg))
+}
+
+func (s *appState) executeCommandLine() {
+	if s.cmdInput == nil {
+		return
+	}
+	cmd := strings.TrimSpace(s.cmdInput.GetText())
+	if cmd == "" {
+		return
+	}
+	s.cmdInput.SetText("")
+	if s.shellIn == nil {
+		s.setStatus("Shell is not available")
+		return
+	}
+	s.appendShellOutput("$ " + cmd + "\n")
+	_, err := io.WriteString(s.shellIn, cmd+"\n")
+	if err != nil {
+		s.setError("Command", cmd, err)
+		return
+	}
+	s.setStatus("Command sent: " + cmd)
+}
+
+func (s *appState) appendCommandRune(r rune) {
+	if s.cmdInput == nil {
+		return
+	}
+	s.cmdInput.SetText(s.cmdInput.GetText() + string(r))
+}
+
+func (s *appState) backspaceCommandRune() {
+	if s.cmdInput == nil {
+		return
+	}
+	text := []rune(s.cmdInput.GetText())
+	if len(text) == 0 {
+		return
+	}
+	s.cmdInput.SetText(string(text[:len(text)-1]))
 }
 
 func (s *appState) setError(action, target string, err error) {
@@ -1175,6 +1257,65 @@ func (s *appState) goToPath() {
 	})
 }
 
+func (s *appState) promptSearch() {
+	s.showInput("Search", "Pattern: ", "", func(value string) {
+		query := strings.ToLower(strings.TrimSpace(value))
+		if query == "" {
+			return
+		}
+		if ok := s.activePanel().search(query); !ok {
+			s.setStatus("Search: no match")
+			return
+		}
+		s.updateInfoStatus()
+	})
+}
+
+func (s *appState) showSortMenu() {
+	options := []struct {
+		label string
+		mode  sortMode
+	}{
+		{"Sort by name", sortByName},
+		{"Sort by extension", sortByExt},
+		{"Sort by modified time", sortByTime},
+		{"Sort by size", sortBySize},
+	}
+	name := fmt.Sprintf("sort-%d", time.Now().UnixNano())
+	list := tview.NewList().ShowSecondaryText(false)
+	list.SetBorder(true)
+	list.SetTitle(" Sort menu ")
+	list.SetBackgroundColor(mcDialogBackground)
+	list.SetBorderColor(mcAccent)
+	list.SetMainTextColor(tcell.ColorWhite)
+	list.SetSelectedBackgroundColor(mcAccent)
+	list.SetSelectedTextColor(tcell.ColorBlack)
+	for _, opt := range options {
+		opt := opt
+		list.AddItem(opt.label, "", 0, func() {
+			a := s.activePanel()
+			a.sortMode = opt.mode
+			_ = a.refresh()
+			s.stylePanels()
+			s.updateInfoStatus()
+			s.closeOverlay(name)
+		})
+	}
+	current := int(s.activePanel().sortMode)
+	if current >= 0 && current < len(options) {
+		list.SetCurrentItem(current)
+	}
+	list.SetDoneFunc(func() { s.closeOverlay(name) })
+	list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyESC {
+			s.closeOverlay(name)
+			return nil
+		}
+		return event
+	})
+	s.showOverlay(name, centered(44, 11, list), list)
+}
+
 func (s *appState) showHelp() {
 	help := strings.Join([]string{
 		"nmc key reference",
@@ -1185,9 +1326,11 @@ func (s *appState) showHelp() {
 		"Left: go to parent directory",
 		"Space/Insert: mark item",
 		"+: select all    -: clear selection    *: invert selection",
-		"Ctrl+R: refresh   Ctrl+S: cycle sort   Ctrl+H: toggle hidden",
+		"Ctrl+R: refresh   Ctrl+S: search prompt   Ctrl+H: toggle hidden",
 		"Ctrl+G: go to path    [: history back    ]: history forward",
 		"Ctrl+O: toggle parallel shell",
+		"Type to command line (bottom), Enter runs command if not empty",
+		"F9: top menu / sort selector",
 		"F3 view  F4 edit  F5 copy  F6 move  F7 mkdir  F8 delete  F10 quit",
 		"ESC+1..0 maps to F1..F10",
 		"",
@@ -1202,20 +1345,15 @@ func (s *appState) showUserMenu() {
 		"",
 		"Use function keys and shortcuts:",
 		"- F3/F4/F5/F6/F7/F8/F10",
-		"- Ctrl+R, Ctrl+S, Ctrl+H, Ctrl+G, Ctrl+O",
+		"- Ctrl+R, Ctrl+S(search), Ctrl+H, Ctrl+G, Ctrl+O",
 		"- Selection with Space/Insert/+/-/*",
+		"- Type to bottom command line, press Enter to send to shell",
 	}, "\n")
 	s.showText("F2 User Menu", menu)
 }
 
 func (s *appState) showTopMenu() {
-	menu := strings.Join([]string{
-		"Top menu (F9)",
-		"",
-		"This lightweight build exposes menu actions via keyboard shortcuts.",
-		"Use F1 for help and F2 for quick command summary.",
-	}, "\n")
-	s.showText("F9 Menu", menu)
+	s.showSortMenu()
 }
 
 func (s *appState) dispatchStandaloneEsc() {
@@ -1339,6 +1477,10 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		}
 		return nil
 	case tcell.KeyRight, tcell.KeyEnter:
+		if event.Key() == tcell.KeyEnter && s.cmdInput != nil && strings.TrimSpace(s.cmdInput.GetText()) != "" {
+			s.executeCommandLine()
+			return nil
+		}
 		s.openSelected()
 		return nil
 	case tcell.KeyLeft:
@@ -1353,9 +1495,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		s.setStatus("Refreshed")
 		return nil
 	case tcell.KeyCtrlS:
-		a.cycleSortMode()
-		s.stylePanels()
-		s.updateInfoStatus()
+		s.promptSearch()
 		return nil
 	case tcell.KeyCtrlH:
 		a.toggleHidden()
@@ -1372,6 +1512,9 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		a.toggleMarkCurrent()
 		s.stylePanels()
 		s.updateInfoStatus()
+		return nil
+	case tcell.KeyBackspace2:
+		s.backspaceCommandRune()
 		return nil
 	case tcell.KeyF1, tcell.KeyF2, tcell.KeyF3, tcell.KeyF4, tcell.KeyF5,
 		tcell.KeyF6, tcell.KeyF7, tcell.KeyF8, tcell.KeyF9, tcell.KeyF10:
@@ -1420,7 +1563,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		}
 		if r >= 32 && r != '+' && r != '-' && r != '*' && r != '[' && r != ']' {
-			s.appendSearch(r)
+			s.appendCommandRune(r)
 			return nil
 		}
 	}
@@ -1456,13 +1599,21 @@ func run() error {
 
 	status := tview.NewTextView().
 		SetDynamicColors(true).
-		SetText(" Tab switch | F3 view F4 edit F5 copy F6 move F7 mkdir F8 delete F10 quit | Ctrl+R refresh Ctrl+S sort Ctrl+H hidden Ctrl+G goto ")
+		SetText(" Tab switch | F3 view F4 edit F5 copy F6 move F7 mkdir F8 delete F10 quit | Ctrl+R refresh Ctrl+S search Ctrl+H hidden Ctrl+G goto Ctrl+O shell ")
 	status.SetBorder(true)
 	status.SetTitle(" Keys/Status ")
 	status.SetBackgroundColor(mcPanelBackground)
 	status.SetBorderColor(mcAccent)
 	status.SetTextColor(tcell.ColorWhite)
 	status.SetTitleColor(tcell.ColorWhite)
+
+	cmdInput := tview.NewInputField().SetLabel(" cmd> ")
+	cmdInput.SetFieldBackgroundColor(mcPanelBackground)
+	cmdInput.SetFieldTextColor(tcell.ColorWhite)
+	cmdInput.SetLabelColor(tcell.ColorWhite)
+	cmdInput.SetBorder(true)
+	cmdInput.SetTitle(" Command line ")
+	cmdInput.SetBorderColor(mcAccentMuted)
 
 	panels := tview.NewFlex().
 		SetDirection(tview.FlexColumn).
@@ -1472,23 +1623,37 @@ func run() error {
 	root := tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(panels, 0, 1, true).
-		AddItem(status, 3, 0, false)
+		AddItem(status, 3, 0, false).
+		AddItem(cmdInput, 3, 0, false)
 
 	pages := tview.NewPages().
 		AddPage("main", root, true, true)
 
 	state := &appState{
-		app:    app,
-		pages:  pages,
-		panels: [2]*panel{left, right},
-		status: status,
+		app:      app,
+		pages:    pages,
+		panels:   [2]*panel{left, right},
+		status:   status,
+		cmdInput: cmdInput,
 	}
+
+	cmdInput.SetDoneFunc(func(key tcell.Key) {
+		switch key {
+		case tcell.KeyEnter:
+			state.executeCommandLine()
+		case tcell.KeyEsc:
+			app.SetFocus(state.activePanel().list)
+		}
+	})
 
 	left.list.SetChangedFunc(func(int, string, string, rune) { state.updateInfoStatus() })
 	right.list.SetChangedFunc(func(int, string, string, rune) { state.updateInfoStatus() })
 
 	state.stylePanels()
 	state.updateInfoStatus()
+	if err := state.startShell(); err != nil {
+		state.setStatus("Shell preload failed: " + err.Error())
+	}
 
 	app.SetInputCapture(state.keyHandler)
 	return app.SetRoot(pages, true).SetFocus(left.list).Run()
