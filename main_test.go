@@ -146,6 +146,13 @@ func TestCopyMoveDirectoryDestinationGuards(t *testing.T) {
 		if err := movePath(srcFile, srcFile); err == nil {
 			t.Fatalf("expected error for movePath with identical source and destination")
 		}
+		equivalent := filepath.Join(root, ".", "same.txt")
+		if err := copyPath(srcFile, equivalent); err == nil {
+			t.Fatalf("expected error for copyPath with equivalent normalized path")
+		}
+		if err := movePath(srcFile, equivalent); err == nil {
+			t.Fatalf("expected error for movePath with equivalent normalized path")
+		}
 	})
 
 	t.Run("copy and move non-descendant work", func(t *testing.T) {

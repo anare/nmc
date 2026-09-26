@@ -623,8 +623,11 @@ func (s *appState) startShell() error {
 	if strings.TrimSpace(shell) == "" {
 		if runtime.GOOS == "windows" {
 			shell = os.Getenv("COMSPEC")
+			if strings.TrimSpace(shell) == "" {
+				shell = "cmd.exe"
+			}
 		}
-		if strings.TrimSpace(shell) == "" {
+		if strings.TrimSpace(shell) == "" && runtime.GOOS != "windows" {
 			shell = "sh"
 		}
 	}
@@ -945,6 +948,20 @@ func isPathInside(base, candidate string) bool {
 	return !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
 }
 
+func pathsEqual(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	absA = filepath.Clean(absA)
+	absB = filepath.Clean(absB)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(absA, absB)
+	}
+	return absA == absB
+}
+
 func (s *appState) editSelected() {
 	a := s.activePanel()
 	item, ok := a.selectedItem()
@@ -1028,7 +1045,7 @@ func copyFile(src, dst string, mode os.FileMode) error {
 }
 
 func copyPath(src, dst string) error {
-	if src == dst {
+	if pathsEqual(src, dst) {
 		return fmt.Errorf("source and destination are identical")
 	}
 	info, err := os.Lstat(src)
@@ -1038,14 +1055,8 @@ func copyPath(src, dst string) error {
 	if info.IsDir() && isPathInside(src, dst) {
 		return fmt.Errorf("destination is inside source")
 	}
-	if dstInfo, statErr := os.Lstat(dst); statErr == nil {
-		if dstInfo.IsDir() && dstInfo.Mode()&os.ModeSymlink == 0 {
-			if err := os.RemoveAll(dst); err != nil {
-				return err
-			}
-		} else if err := os.Remove(dst); err != nil {
-			return err
-		}
+	if _, statErr := os.Lstat(dst); statErr == nil {
+		return fmt.Errorf("destination already exists: %s", dst)
 	} else if !os.IsNotExist(statErr) {
 		return statErr
 	}
@@ -1092,7 +1103,7 @@ func copyPath(src, dst string) error {
 }
 
 func movePath(src, dst string) error {
-	if src == dst {
+	if pathsEqual(src, dst) {
 		return fmt.Errorf("source and destination are identical")
 	}
 	if srcInfo, err := os.Lstat(src); err == nil && srcInfo.IsDir() && isPathInside(src, dst) {
@@ -1105,18 +1116,29 @@ func movePath(src, dst string) error {
 			return err
 		}
 	}
+	tmpDst := fmt.Sprintf("%s.nmc-move-tmp-%d", dst, time.Now().UnixNano())
+	if _, err := os.Lstat(tmpDst); err == nil {
+		return fmt.Errorf("temporary destination already exists")
+	}
+	if err := copyPath(src, tmpDst); err != nil {
+		return err
+	}
 	if dstInfo, err := os.Lstat(dst); err == nil {
 		if dstInfo.IsDir() && dstInfo.Mode()&os.ModeSymlink == 0 {
 			if err := os.RemoveAll(dst); err != nil {
+				_ = os.RemoveAll(tmpDst)
 				return err
 			}
 		} else if err := os.Remove(dst); err != nil {
+			_ = os.RemoveAll(tmpDst)
 			return err
 		}
 	} else if !os.IsNotExist(err) {
+		_ = os.RemoveAll(tmpDst)
 		return err
 	}
-	if err := copyPath(src, dst); err != nil {
+	if err := os.Rename(tmpDst, dst); err != nil {
+		_ = os.RemoveAll(tmpDst)
 		return err
 	}
 	info, err := os.Lstat(src)
@@ -1154,7 +1176,7 @@ func (s *appState) copySelected() {
 	copied := 0
 	for _, src := range targets {
 		dst := filepath.Join(b.path, filepath.Base(src))
-		if src == dst {
+		if pathsEqual(src, dst) {
 			continue
 		}
 		if err := copyPath(src, dst); err != nil {
@@ -1179,7 +1201,7 @@ func (s *appState) moveSelected() {
 	moved := 0
 	for _, src := range targets {
 		dst := filepath.Join(b.path, filepath.Base(src))
-		if src == dst {
+		if pathsEqual(src, dst) {
 			continue
 		}
 		if err := movePath(src, dst); err != nil {
@@ -1330,6 +1352,7 @@ func (s *appState) showHelp() {
 		"+: select all    -: clear selection    *: invert selection",
 		"Ctrl+R: refresh   Ctrl+S: search prompt   Ctrl+H: toggle hidden",
 		"Ctrl+G: go to path    [: history back    ]: history forward",
+		"Ctrl+L: focus command line",
 		"Ctrl+O: toggle parallel shell",
 		"Type to command line (bottom), Enter runs command if not empty",
 		"F9: top menu / sort selector",
@@ -1347,7 +1370,7 @@ func (s *appState) showUserMenu() {
 		"",
 		"Use function keys and shortcuts:",
 		"- F3/F4/F5/F6/F7/F8/F10",
-		"- Ctrl+R, Ctrl+S(search), Ctrl+H, Ctrl+G, Ctrl+O",
+		"- Ctrl+R, Ctrl+S(search), Ctrl+H, Ctrl+G, Ctrl+L, Ctrl+O",
 		"- Selection with Space/Insert/+/-/*",
 		"- Type to bottom command line, press Enter to send to shell",
 	}, "\n")
@@ -1395,6 +1418,9 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		}
 		s.resetEscState()
+		return event
+	}
+	if s.cmdInput != nil && s.app.GetFocus() == s.cmdInput {
 		return event
 	}
 
@@ -1482,6 +1508,11 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyCtrlG:
 		s.goToPath()
+		return nil
+	case tcell.KeyCtrlL:
+		if s.cmdInput != nil {
+			s.app.SetFocus(s.cmdInput)
+		}
 		return nil
 	case tcell.KeyCtrlO:
 		s.toggleShellPage()
@@ -1577,7 +1608,7 @@ func run() error {
 
 	status := tview.NewTextView().
 		SetDynamicColors(true).
-		SetText(" Tab switch | Type goes to cmd line; Enter runs cmd when non-empty | F3/F4/F5/F6/F7/F8/F10 | Ctrl+R refresh Ctrl+S search Ctrl+O shell F9 sort ")
+		SetText(" Tab switch | Type goes to cmd line; Enter runs cmd when non-empty | Ctrl+L focus cmd | F3/F4/F5/F6/F7/F8/F10 | Ctrl+R refresh Ctrl+S search Ctrl+O shell F9 sort ")
 	status.SetBorder(true)
 	status.SetTitle(" Keys/Status ")
 	status.SetBackgroundColor(mcPanelBackground)
