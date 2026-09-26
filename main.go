@@ -695,7 +695,8 @@ func openFileDefault(path string) error {
 	case "darwin":
 		return runExternal("open", path)
 	case "windows":
-		return runExternal("cmd", "/c", "start", "", path)
+		quoted := `"` + strings.ReplaceAll(path, `"`, `""`) + `"`
+		return runExternal("cmd", "/c", "start", "", quoted)
 	default:
 		return runExternal("xdg-open", path)
 	}
@@ -758,7 +759,9 @@ func copyPath(src, dst string) error {
 		if linkErr != nil {
 			return linkErr
 		}
-		_ = os.Remove(dst)
+		if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 		return os.Symlink(target, dst)
 	}
 	if info.IsDir() {
@@ -860,8 +863,12 @@ func (s *appState) makeDirectory() {
 			s.setStatus("F7 canceled")
 			return
 		}
+		if name == "." || name == ".." || filepath.Base(name) != name || strings.Contains(name, "/") || strings.Contains(name, `\`) {
+			s.setStatus("F7 requires a single directory name")
+			return
+		}
 		target := filepath.Join(a.path, name)
-		if err := os.MkdirAll(target, 0o755); err != nil {
+		if err := os.Mkdir(target, 0o755); err != nil {
 			s.setError("Mkdir", target, err)
 			return
 		}
