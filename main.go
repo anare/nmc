@@ -1065,22 +1065,7 @@ func copyPath(src, dst string) error {
 		if linkErr != nil {
 			return linkErr
 		}
-		tmpDst := fmt.Sprintf("%s.nmc-tmp-%d", dst, time.Now().UnixNano())
-		if err := os.Symlink(target, tmpDst); err != nil {
-			return err
-		}
-		if _, err := os.Lstat(dst); err == nil {
-			_ = os.Remove(tmpDst)
-			return fmt.Errorf("destination changed during copy")
-		} else if !os.IsNotExist(err) {
-			_ = os.Remove(tmpDst)
-			return err
-		}
-		if err := os.Rename(tmpDst, dst); err != nil {
-			_ = os.Remove(tmpDst)
-			return err
-		}
-		return nil
+		return os.Symlink(target, dst)
 	}
 	if info.IsDir() {
 		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
@@ -1123,13 +1108,10 @@ func movePath(src, dst string) error {
 	if err := copyPath(src, tmpDst); err != nil {
 		return err
 	}
+	var backupDst string
 	if dstInfo, err := os.Lstat(dst); err == nil {
-		if dstInfo.IsDir() && dstInfo.Mode()&os.ModeSymlink == 0 {
-			if err := os.RemoveAll(dst); err != nil {
-				_ = os.RemoveAll(tmpDst)
-				return err
-			}
-		} else if err := os.Remove(dst); err != nil {
+		backupDst = fmt.Sprintf("%s.nmc-backup-%d", dst, time.Now().UnixNano())
+		if err := os.Rename(dst, backupDst); err != nil {
 			_ = os.RemoveAll(tmpDst)
 			return err
 		}
@@ -1139,7 +1121,13 @@ func movePath(src, dst string) error {
 	}
 	if err := os.Rename(tmpDst, dst); err != nil {
 		_ = os.RemoveAll(tmpDst)
+		if backupDst != "" {
+			_ = os.Rename(backupDst, dst)
+		}
 		return err
+	}
+	if backupDst != "" {
+		_ = os.RemoveAll(backupDst)
 	}
 	info, err := os.Lstat(src)
 	if err != nil {
