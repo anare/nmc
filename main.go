@@ -21,6 +21,14 @@ const (
 	maxViewSize     = 512 * 1024
 )
 
+var (
+	mcBackground       = tcell.NewRGBColor(0, 0, 96)
+	mcPanelBackground  = tcell.NewRGBColor(0, 0, 128)
+	mcDialogBackground = tcell.NewRGBColor(0, 0, 84)
+	mcAccent           = tcell.NewRGBColor(0, 170, 255)
+	mcAccentMuted      = tcell.NewRGBColor(70, 120, 200)
+)
+
 type sortMode int
 
 const (
@@ -68,7 +76,12 @@ func newPanel(title string) *panel {
 	l := tview.NewList().ShowSecondaryText(false)
 	l.SetBorder(true)
 	l.SetTitle(" " + title + " ")
+	l.SetBackgroundColor(mcPanelBackground)
 	l.SetMainTextColor(tcell.ColorWhite)
+	l.SetSelectedBackgroundColor(mcAccent)
+	l.SetSelectedTextColor(tcell.ColorBlack)
+	l.SetBorderColor(mcAccentMuted)
+	l.SetTitleColor(tcell.ColorWhite)
 	return &panel{
 		name:       title,
 		list:       l,
@@ -384,16 +397,17 @@ func (p *panel) updateTitle() {
 }
 
 type appState struct {
-	app         *tview.Application
-	pages       *tview.Pages
-	panels      [2]*panel
-	active      int
-	status      *tview.TextView
-	escPending  bool
-	escTimer    *time.Timer
-	passEsc     bool
-	searchQuery string
-	searchTimer *time.Timer
+	app          *tview.Application
+	pages        *tview.Pages
+	panels       [2]*panel
+	active       int
+	status       *tview.TextView
+	escPending   bool
+	escTimer     *time.Timer
+	passEsc      bool
+	searchQuery  string
+	searchTimer  *time.Timer
+	overlayDepth int
 }
 
 func (s *appState) setStatus(msg string) {
@@ -431,9 +445,9 @@ func (s *appState) switchPanel() {
 func (s *appState) stylePanels() {
 	for i, p := range s.panels {
 		if i == s.active {
-			p.list.SetBorderColor(tcell.ColorYellow)
+			p.list.SetBorderColor(mcAccent)
 		} else {
-			p.list.SetBorderColor(tcell.ColorGray)
+			p.list.SetBorderColor(mcAccentMuted)
 		}
 		p.updateTitle()
 	}
@@ -484,12 +498,31 @@ func (s *appState) handleFunctionKey(num int) {
 
 func (s *appState) closeOverlay(name string) {
 	s.pages.RemovePage(name)
+	if s.overlayDepth > 0 {
+		s.overlayDepth--
+	}
+	s.resetEscState()
 	s.app.SetFocus(s.activePanel().list)
 }
 
 func (s *appState) showOverlay(name string, primitive tview.Primitive, focus tview.Primitive) {
+	s.resetEscState()
+	s.overlayDepth++
 	s.pages.AddAndSwitchToPage(name, primitive, true)
 	s.app.SetFocus(focus)
+}
+
+func (s *appState) overlayVisible() bool {
+	return s.overlayDepth > 0
+}
+
+func (s *appState) resetEscState() {
+	s.escPending = false
+	s.passEsc = false
+	if s.escTimer != nil {
+		s.escTimer.Stop()
+		s.escTimer = nil
+	}
 }
 
 func centered(width, height int, p tview.Primitive) tview.Primitive {
@@ -509,6 +542,15 @@ func (s *appState) showConfirm(title, msg string, onYes func()) {
 	modal.SetText(msg)
 	modal.AddButtons([]string{"Cancel", "OK"})
 	modal.SetTitle(" " + title + " ")
+	modal.SetBackgroundColor(mcDialogBackground)
+	modal.SetBorderColor(mcAccent)
+	modal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyESC {
+			s.closeOverlay(name)
+			return nil
+		}
+		return event
+	})
 	modal.SetDoneFunc(func(_ int, label string) {
 		s.closeOverlay(name)
 		if label == "OK" && onYes != nil {
@@ -534,6 +576,18 @@ func (s *appState) showInput(title, label, initial string, onOK func(string)) {
 	form.SetBorder(true)
 	form.SetTitle(" " + title + " ")
 	form.SetButtonsAlign(tview.AlignCenter)
+	form.SetBackgroundColor(mcDialogBackground)
+	form.SetBorderColor(mcAccent)
+	form.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyESC {
+			s.closeOverlay(name)
+			return nil
+		}
+		return event
+	})
+	input.SetFieldBackgroundColor(mcPanelBackground)
+	input.SetFieldTextColor(tcell.ColorWhite)
+	input.SetLabelColor(tcell.ColorWhite)
 	s.showOverlay(name, centered(70, 9, form), input)
 }
 
@@ -545,6 +599,9 @@ func (s *appState) showText(title, body string) {
 		SetWrap(false)
 	text.SetBorder(true)
 	text.SetTitle(" " + title + " ")
+	text.SetBackgroundColor(mcDialogBackground)
+	text.SetBorderColor(mcAccent)
+	text.SetTitleColor(tcell.ColorWhite)
 	text.SetText(body)
 	text.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEscape || key == tcell.KeyEnter || key == tcell.KeyF10 {
@@ -946,6 +1003,14 @@ func (s *appState) appendSearch(r rune) {
 }
 
 func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
+	if s.overlayVisible() {
+		if event.Key() == tcell.KeyRune && (event.Rune() == escTimeoutRune || event.Rune() == searchResetRune) {
+			return nil
+		}
+		s.resetEscState()
+		return event
+	}
+
 	if event.Key() == tcell.KeyRune && event.Rune() == escTimeoutRune {
 		if s.escPending {
 			s.dispatchStandaloneEsc()
@@ -1096,6 +1161,14 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 
 func run() error {
 	app := tview.NewApplication()
+	tview.Styles.PrimitiveBackgroundColor = mcBackground
+	tview.Styles.ContrastBackgroundColor = mcPanelBackground
+	tview.Styles.MoreContrastBackgroundColor = mcDialogBackground
+	tview.Styles.BorderColor = mcAccent
+	tview.Styles.TitleColor = tcell.ColorWhite
+	tview.Styles.GraphicsColor = mcAccent
+	tview.Styles.PrimaryTextColor = tcell.ColorWhite
+	tview.Styles.SecondaryTextColor = tcell.ColorLightCyan
 
 	left := newPanel("Left")
 	right := newPanel("Right")
@@ -1117,6 +1190,10 @@ func run() error {
 		SetText(" Tab switch | F3 view F4 edit F5 copy F6 move F7 mkdir F8 delete F10 quit | Ctrl+R refresh Ctrl+S sort Ctrl+H hidden Ctrl+G goto ")
 	status.SetBorder(true)
 	status.SetTitle(" Keys/Status ")
+	status.SetBackgroundColor(mcPanelBackground)
+	status.SetBorderColor(mcAccent)
+	status.SetTextColor(tcell.ColorWhite)
+	status.SetTitleColor(tcell.ColorWhite)
 
 	panels := tview.NewFlex().
 		SetDirection(tview.FlexColumn).
