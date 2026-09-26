@@ -495,6 +495,9 @@ func (s *appState) executeCommandLine() {
 }
 
 func (s *appState) applyCommandLineEffects(raw string) {
+	if strings.ContainsAny(raw, "|&;`$()<>") {
+		return
+	}
 	parts, err := splitCommandLine(strings.TrimSpace(raw))
 	if err != nil || len(parts) == 0 {
 		return
@@ -692,6 +695,9 @@ func (s *appState) shellPageVisible() bool {
 }
 
 func (s *appState) startShell() error {
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("preloaded shell is not supported on windows in this build")
+	}
 	shell := defaultUserShell()
 	cmd := exec.Command(shell)
 	if s.activePanel() != nil {
@@ -769,6 +775,14 @@ func (s *appState) streamShellOutput(r io.Reader) {
 			})
 		}
 		if err != nil {
+			s.shellMu.Lock()
+			s.shellIn = nil
+			s.shellPTY = nil
+			s.shellCmd = nil
+			s.shellMu.Unlock()
+			s.app.QueueUpdateDraw(func() {
+				s.appendShellOutput("\n[red]shell exited[-]\n")
+			})
 			return
 		}
 	}
@@ -825,11 +839,23 @@ func (s *appState) showShellPage() {
 				s.closeOverlay("shell")
 				return nil
 			}
+			if event.Modifiers() == tcell.ModShift {
+				switch event.Key() {
+				case tcell.KeyPgUp:
+					row, col := s.shellView.GetScrollOffset()
+					s.shellView.ScrollTo(max(0, row-20), col)
+					return nil
+				case tcell.KeyPgDn:
+					row, col := s.shellView.GetScrollOffset()
+					s.shellView.ScrollTo(row+20, col)
+					return nil
+				}
+			}
 			s.writeShellKey(event)
 			return nil
 		})
 		s.pages.AddPage("shell", s.shellView, true, false)
-		s.appendShellOutput("Shell preloaded. Ctrl+O to return to panels.\n")
+		s.appendShellOutput("Shell preloaded. Ctrl+O to return. Shift+PgUp/PgDn scroll output.\n")
 	}
 	s.resetEscState()
 	s.pages.ShowPage("shell")
