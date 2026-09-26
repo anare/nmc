@@ -1130,8 +1130,8 @@ func runExternalDetached(command string, args ...string) error {
 }
 
 func isPathInside(base, candidate string) bool {
-	baseAbs, baseErr := filepath.Abs(base)
-	candidateAbs, candidateErr := filepath.Abs(candidate)
+	baseAbs, baseErr := normalizedPath(base)
+	candidateAbs, candidateErr := normalizedPath(candidate)
 	if baseErr != nil || candidateErr != nil {
 		return false
 	}
@@ -1143,6 +1143,17 @@ func isPathInside(base, candidate string) bool {
 		return true
 	}
 	return !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
+}
+
+func normalizedPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+	return filepath.Clean(abs), nil
 }
 
 func pathsEqual(a, b string) bool {
@@ -1218,7 +1229,11 @@ func (s *appState) openSelected() {
 			}
 			launched++
 		}
-		s.setStatus(fmt.Sprintf("Launched %d file(s)", launched))
+		if launched == 0 {
+			s.setStatus("No launchable files in selection")
+		} else {
+			s.setStatus(fmt.Sprintf("Launched %d file(s)", launched))
+		}
 		return
 	}
 	item, ok := a.selectedItem()
@@ -1857,6 +1872,7 @@ func run() error {
 		case tcell.KeyEnter:
 			state.executeCommandLine()
 		case tcell.KeyEsc:
+			state.resetEscState()
 			state.styleCommandLine(false)
 			app.SetFocus(state.activePanel().list)
 		}
