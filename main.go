@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -409,6 +411,11 @@ type appState struct {
 	passEsc     bool
 	searchQuery string
 	searchTimer *time.Timer
+	shellCmd    *exec.Cmd
+	shellIn     io.WriteCloser
+	shellView   *tview.TextView
+	shellInput  *tview.InputField
+	shellMu     sync.Mutex
 }
 
 func (s *appState) setStatus(msg string) {
@@ -498,7 +505,11 @@ func (s *appState) handleFunctionKey(num int) {
 }
 
 func (s *appState) closeOverlay(name string) {
-	s.pages.RemovePage(name)
+	if name == "shell" {
+		s.pages.SwitchToPage("main")
+	} else {
+		s.pages.RemovePage(name)
+	}
 	s.resetEscState()
 	s.app.SetFocus(s.activePanel().list)
 }
@@ -512,6 +523,132 @@ func (s *appState) showOverlay(name string, primitive tview.Primitive, focus tvi
 func (s *appState) overlayVisible() bool {
 	name, _ := s.pages.GetFrontPage()
 	return name != "main"
+}
+
+func (s *appState) appendShellOutput(text string) {
+	s.shellMu.Lock()
+	defer s.shellMu.Unlock()
+	if s.shellView == nil {
+		return
+	}
+	s.shellView.Write([]byte(text))
+	s.shellView.ScrollToEnd()
+}
+
+func (s *appState) shellPageVisible() bool {
+	name, _ := s.pages.GetFrontPage()
+	return name == "shell"
+}
+
+func (s *appState) startShell() error {
+	shell := os.Getenv("SHELL")
+	if strings.TrimSpace(shell) == "" {
+		if runtime.GOOS == "windows" {
+			shell = os.Getenv("COMSPEC")
+		}
+		if strings.TrimSpace(shell) == "" {
+			shell = "sh"
+		}
+	}
+	cmd := exec.Command(shell)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	s.shellCmd = cmd
+	s.shellIn = stdin
+	go s.streamShellOutput(stdout)
+	go s.streamShellOutput(stderr)
+	return nil
+}
+
+func (s *appState) streamShellOutput(r io.Reader) {
+	reader := bufio.NewReader(r)
+	for {
+		line, err := reader.ReadString('\n')
+		if line != "" {
+			content := line
+			s.app.QueueUpdateDraw(func() {
+				s.appendShellOutput(content)
+			})
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (s *appState) showShellPage() {
+	if s.shellView == nil {
+		s.shellView = tview.NewTextView().
+			SetDynamicColors(true).
+			SetScrollable(true).
+			SetWrap(true)
+		s.shellView.SetBorder(true)
+		s.shellView.SetTitle(" Shell (Ctrl+O to return) ")
+		s.shellView.SetBackgroundColor(mcDialogBackground)
+		s.shellView.SetBorderColor(mcAccent)
+		s.shellInput = tview.NewInputField().SetLabel("$ ")
+		s.shellInput.SetFieldBackgroundColor(mcPanelBackground)
+		s.shellInput.SetFieldTextColor(tcell.ColorWhite)
+		s.shellInput.SetLabelColor(tcell.ColorWhite)
+		s.shellInput.SetDoneFunc(func(key tcell.Key) {
+			switch key {
+			case tcell.KeyEnter:
+				cmd := strings.TrimSpace(s.shellInput.GetText())
+				s.shellInput.SetText("")
+				if cmd != "" {
+					s.appendShellOutput("$ " + cmd + "\n")
+					if s.shellIn != nil {
+						_, _ = io.WriteString(s.shellIn, cmd+"\n")
+					}
+				}
+			case tcell.KeyCtrlO, tcell.KeyEsc:
+				s.closeOverlay("shell")
+			}
+		})
+		layout := tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(s.shellView, 0, 1, false).
+			AddItem(s.shellInput, 1, 0, true)
+		layout.SetBorder(true)
+		layout.SetTitle(" Parallel Shell ")
+		layout.SetBorderColor(mcAccent)
+		layout.SetBackgroundColor(mcDialogBackground)
+		layout.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+			if event.Key() == tcell.KeyCtrlO {
+				s.closeOverlay("shell")
+				return nil
+			}
+			return event
+		})
+		s.pages.AddPage("shell", layout, true, false)
+		s.appendShellOutput("Shell preloaded. Type commands and press Enter.\n")
+	}
+	s.resetEscState()
+	s.pages.ShowPage("shell")
+	s.pages.SwitchToPage("shell")
+	s.app.SetFocus(s.shellInput)
+}
+
+func (s *appState) toggleShellPage() {
+	if s.shellPageVisible() {
+		s.closeOverlay("shell")
+		s.setStatus("Returned to panels")
+		return
+	}
+	s.showShellPage()
+	s.setStatus("Shell active (Ctrl+O to return)")
 }
 
 func (s *appState) resetEscState() {
@@ -836,7 +973,22 @@ func copyPath(src, dst string) error {
 		if linkErr != nil {
 			return linkErr
 		}
-		return os.Symlink(target, dst)
+		tmpDst := fmt.Sprintf("%s.nmc-tmp-%d", dst, time.Now().UnixNano())
+		if err := os.Symlink(target, tmpDst); err != nil {
+			return err
+		}
+		if _, err := os.Lstat(dst); err == nil {
+			_ = os.Remove(tmpDst)
+			return fmt.Errorf("destination changed during copy")
+		} else if !os.IsNotExist(err) {
+			_ = os.Remove(tmpDst)
+			return err
+		}
+		if err := os.Rename(tmpDst, dst); err != nil {
+			_ = os.Remove(tmpDst)
+			return err
+		}
+		return nil
 	}
 	if info.IsDir() {
 		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
@@ -859,7 +1011,7 @@ func copyPath(src, dst string) error {
 }
 
 func movePath(src, dst string) error {
-	if isPathInside(src, dst) {
+	if srcInfo, err := os.Lstat(src); err == nil && srcInfo.IsDir() && isPathInside(src, dst) {
 		return fmt.Errorf("destination is inside source")
 	}
 	if err := os.Rename(src, dst); err == nil {
@@ -1035,6 +1187,7 @@ func (s *appState) showHelp() {
 		"+: select all    -: clear selection    *: invert selection",
 		"Ctrl+R: refresh   Ctrl+S: cycle sort   Ctrl+H: toggle hidden",
 		"Ctrl+G: go to path    [: history back    ]: history forward",
+		"Ctrl+O: toggle parallel shell",
 		"F3 view  F4 edit  F5 copy  F6 move  F7 mkdir  F8 delete  F10 quit",
 		"ESC+1..0 maps to F1..F10",
 		"",
@@ -1049,7 +1202,7 @@ func (s *appState) showUserMenu() {
 		"",
 		"Use function keys and shortcuts:",
 		"- F3/F4/F5/F6/F7/F8/F10",
-		"- Ctrl+R, Ctrl+S, Ctrl+H, Ctrl+G",
+		"- Ctrl+R, Ctrl+S, Ctrl+H, Ctrl+G, Ctrl+O",
 		"- Selection with Space/Insert/+/-/*",
 	}, "\n")
 	s.showText("F2 User Menu", menu)
@@ -1211,6 +1364,9 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyCtrlG:
 		s.goToPath()
+		return nil
+	case tcell.KeyCtrlO:
+		s.toggleShellPage()
 		return nil
 	case tcell.KeyInsert:
 		a.toggleMarkCurrent()
