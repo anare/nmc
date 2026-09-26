@@ -491,6 +491,17 @@ func (s *appState) appendCommandRune(r rune) {
 	s.cmdInput.SetText(s.cmdInput.GetText() + string(r))
 }
 
+func (s *appState) styleCommandLine(focused bool) {
+	if s.cmdInput == nil {
+		return
+	}
+	if focused {
+		s.cmdInput.SetBorderColor(mcAccent)
+	} else {
+		s.cmdInput.SetBorderColor(mcAccentMuted)
+	}
+}
+
 func (s *appState) backspaceCommandRune() {
 	if s.cmdInput == nil {
 		return
@@ -525,6 +536,7 @@ func (s *appState) passivePanel() *panel {
 
 func (s *appState) switchPanel() {
 	s.active = 1 - s.active
+	s.styleCommandLine(false)
 	s.stylePanels()
 	s.app.SetFocus(s.activePanel().list)
 	s.updateInfoStatus()
@@ -591,11 +603,13 @@ func (s *appState) closeOverlay(name string) {
 		s.pages.RemovePage(name)
 	}
 	s.resetEscState()
+	s.styleCommandLine(false)
 	s.app.SetFocus(s.activePanel().list)
 }
 
 func (s *appState) showOverlay(name string, primitive tview.Primitive, focus tview.Primitive) {
 	s.resetEscState()
+	s.styleCommandLine(false)
 	s.pages.AddAndSwitchToPage(name, primitive, true)
 	s.app.SetFocus(focus)
 }
@@ -1137,12 +1151,14 @@ func copyPath(src, dst string) error {
 		}
 		entries, err := os.ReadDir(src)
 		if err != nil {
+			_ = os.RemoveAll(dst)
 			return err
 		}
 		for _, entry := range entries {
 			childSrc := filepath.Join(src, entry.Name())
 			childDst := filepath.Join(dst, entry.Name())
 			if err := copyPath(childSrc, childDst); err != nil {
+				_ = os.RemoveAll(dst)
 				return err
 			}
 		}
@@ -1174,25 +1190,26 @@ func movePath(src, dst string) error {
 	if _, err := os.Lstat(tmpDst); err == nil {
 		return fmt.Errorf("temporary destination already exists")
 	}
-	if err := copyPath(src, tmpDst); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpDst, dst); err != nil {
-		_ = os.RemoveAll(tmpDst)
-		return err
-	}
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
 	}
+	if err := copyPath(src, tmpDst); err != nil {
+		return err
+	}
 	if info.IsDir() {
 		if err := os.RemoveAll(src); err != nil {
+			_ = os.RemoveAll(tmpDst)
 			return fmt.Errorf("move completed but failed to remove source: %w", err)
 		}
-		return nil
+	} else {
+		if err := os.Remove(src); err != nil {
+			_ = os.RemoveAll(tmpDst)
+			return fmt.Errorf("move completed but failed to remove source: %w", err)
+		}
 	}
-	if err := os.Remove(src); err != nil {
-		return fmt.Errorf("move completed but failed to remove source: %w", err)
+	if err := os.Rename(tmpDst, dst); err != nil {
+		return fmt.Errorf("source removed but failed to publish destination (temp: %s): %w", tmpDst, err)
 	}
 	return nil
 }
@@ -1553,6 +1570,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyCtrlL:
 		if s.cmdInput != nil {
+			s.styleCommandLine(true)
 			s.app.SetFocus(s.cmdInput)
 		}
 		return nil
@@ -1689,6 +1707,7 @@ func run() error {
 		case tcell.KeyEnter:
 			state.executeCommandLine()
 		case tcell.KeyEsc:
+			state.styleCommandLine(false)
 			app.SetFocus(state.activePanel().list)
 		}
 	})
@@ -1697,6 +1716,7 @@ func run() error {
 	right.list.SetChangedFunc(func(int, string, string, rune) { state.updateInfoStatus() })
 
 	state.stylePanels()
+	state.styleCommandLine(false)
 	state.updateInfoStatus()
 	if err := state.startShell(); err != nil {
 		state.setStatus("Shell preload failed: " + err.Error())
