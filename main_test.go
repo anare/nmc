@@ -24,6 +24,8 @@ func TestSplitCommandLine(t *testing.T) {
 		{name: "single quoted arg", input: "editor 'my file.txt'", want: []string{"editor", "my file.txt"}},
 		{name: "escaped space", input: "my\\ editor --wait", want: []string{"my editor", "--wait"}},
 		{name: "mixed quotes", input: "cmd \"two words\" 'three words'", want: []string{"cmd", "two words", "three words"}},
+		{name: "empty double quoted arg", input: "cmd \"\"", want: []string{"cmd", ""}},
+		{name: "empty single quoted arg", input: "cmd ''", want: []string{"cmd", ""}},
 		{name: "unterminated double", input: "code \"oops", wantErr: true},
 		{name: "unterminated single", input: "code 'oops", wantErr: true},
 		{name: "trailing escape", input: "code \\", wantErr: true},

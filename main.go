@@ -130,7 +130,8 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 	}
 
 	items := make([]listItem, 0, len(entries)+1)
-	if parent := filepath.Dir(absPath); parent != absPath {
+	parent := filepath.Dir(absPath)
+	if parent != absPath || runtime.GOOS == "windows" {
 		items = append(items, listItem{name: "..", path: parent, isDir: true})
 	}
 
@@ -695,13 +696,32 @@ func (s *appState) shellPageVisible() bool {
 }
 
 func (s *appState) startShell() error {
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("preloaded shell is not supported on windows in this build")
-	}
 	shell := defaultUserShell()
 	cmd := exec.Command(shell)
 	if s.activePanel() != nil {
 		cmd.Dir = s.activePanel().path
+	}
+	if runtime.GOOS == "windows" {
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return err
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return err
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return err
+		}
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		s.shellCmd = cmd
+		s.shellIn = stdin
+		go s.streamShellOutput(stdout)
+		go s.streamShellOutput(stderr)
+		return nil
 	}
 	tty, err := pty.Start(cmd)
 	if err != nil {
@@ -1024,27 +1044,34 @@ func splitCommandLine(command string) ([]string, error) {
 	inSingle := false
 	inDouble := false
 	escaped := false
+	argStarted := false
 	flush := func() {
-		if current.Len() > 0 {
+		if current.Len() > 0 || argStarted {
 			parts = append(parts, current.String())
 			current.Reset()
+			argStarted = false
 		}
 	}
 	for _, r := range command {
 		switch {
 		case escaped:
 			current.WriteRune(r)
+			argStarted = true
 			escaped = false
 		case r == '\\' && !inSingle:
+			argStarted = true
 			escaped = true
 		case r == '\'' && !inDouble:
+			argStarted = true
 			inSingle = !inSingle
 		case r == '"' && !inSingle:
+			argStarted = true
 			inDouble = !inDouble
 		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
 			flush()
 		default:
 			current.WriteRune(r)
+			argStarted = true
 		}
 	}
 	if escaped || inSingle || inDouble {
