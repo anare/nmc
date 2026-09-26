@@ -115,6 +115,9 @@ func (p *panel) pushHistory(path string) {
 }
 
 func (p *panel) load(path string, selectIndex int, addHistory bool) error {
+	if !filepath.IsAbs(path) && p.path != "" {
+		path = filepath.Join(p.path, path)
+	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -181,7 +184,12 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 					return a.size > b.size
 				}
 			}
-			return strings.ToLower(a.name) < strings.ToLower(b.name)
+			aLower := strings.ToLower(a.name)
+			bLower := strings.ToLower(b.name)
+			if aLower != bLower {
+				return aLower < bLower
+			}
+			return a.name < b.name
 		})
 	}
 
@@ -736,6 +744,10 @@ func (s *appState) startShell() error {
 		s.shellIn = stdin
 		go s.streamShellOutput(stdout)
 		go s.streamShellOutput(stderr)
+		go func() {
+			_ = cmd.Wait()
+			s.markShellExited()
+		}()
 		return nil
 	}
 	tty, err := pty.Start(cmd)
@@ -747,6 +759,10 @@ func (s *appState) startShell() error {
 	s.shellPTY = tty
 	s.shellGone = false
 	go s.streamShellOutput(tty)
+	go func() {
+		_ = cmd.Wait()
+		s.markShellExited()
+	}()
 	return nil
 }
 
@@ -811,7 +827,6 @@ func (s *appState) streamShellOutput(r io.Reader) {
 			})
 		}
 		if err != nil {
-			s.markShellExited()
 			return
 		}
 	}
