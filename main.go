@@ -55,6 +55,10 @@ func (s sortMode) String() string {
 	}
 }
 
+func shellQuotePOSIX(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+}
+
 type listItem struct {
 	name    string
 	path    string
@@ -151,9 +155,13 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 	}
 
 	if len(items) > 1 {
-		sort.Slice(items[1:], func(i, j int) bool {
-			a := items[i+1]
-			b := items[j+1]
+		sortStart := 0
+		if items[0].name == ".." {
+			sortStart = 1
+		}
+		sort.Slice(items[sortStart:], func(i, j int) bool {
+			a := items[i+sortStart]
+			b := items[j+sortStart]
 			if a.isDir != b.isDir {
 				return a.isDir
 			}
@@ -484,6 +492,17 @@ func (s *appState) executeCommandLine() {
 	s.setStatus("Command sent: " + strings.TrimSpace(raw))
 }
 
+func (s *appState) syncShellCwd(path string) {
+	if s.shellIn == nil || strings.TrimSpace(path) == "" {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		_, _ = io.WriteString(s.shellIn, "cd /d "+strconv.Quote(path)+"\n")
+		return
+	}
+	_, _ = io.WriteString(s.shellIn, "cd "+shellQuotePOSIX(path)+"\n")
+}
+
 func (s *appState) appendCommandRune(r rune) {
 	if s.cmdInput == nil {
 		return
@@ -539,6 +558,7 @@ func (s *appState) switchPanel() {
 	s.styleCommandLine(false)
 	s.stylePanels()
 	s.app.SetFocus(s.activePanel().list)
+	s.syncShellCwd(s.activePanel().path)
 	s.updateInfoStatus()
 }
 
@@ -637,6 +657,9 @@ func (s *appState) shellPageVisible() bool {
 func (s *appState) startShell() error {
 	shell := defaultUserShell()
 	cmd := exec.Command(shell)
+	if s.activePanel() != nil {
+		cmd.Dir = s.activePanel().path
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -1088,6 +1111,7 @@ func (s *appState) openSelected() {
 			s.setError("Open", item.path, err)
 			return
 		}
+		s.syncShellCwd(a.path)
 		s.updateInfoStatus()
 		return
 	}
@@ -1190,26 +1214,25 @@ func movePath(src, dst string) error {
 	if _, err := os.Lstat(tmpDst); err == nil {
 		return fmt.Errorf("temporary destination already exists")
 	}
-	info, err := os.Lstat(src)
-	if err != nil {
-		return err
-	}
 	if err := copyPath(src, tmpDst); err != nil {
 		return err
 	}
+	if err := os.Rename(tmpDst, dst); err != nil {
+		_ = os.RemoveAll(tmpDst)
+		return err
+	}
+	info, err := os.Lstat(src)
+	if err != nil {
+		return fmt.Errorf("destination published but failed to stat source for cleanup: %w", err)
+	}
 	if info.IsDir() {
 		if err := os.RemoveAll(src); err != nil {
-			_ = os.RemoveAll(tmpDst)
-			return fmt.Errorf("move completed but failed to remove source: %w", err)
+			return fmt.Errorf("destination published but source cleanup failed: %w", err)
 		}
 	} else {
 		if err := os.Remove(src); err != nil {
-			_ = os.RemoveAll(tmpDst)
-			return fmt.Errorf("move completed but failed to remove source: %w", err)
+			return fmt.Errorf("destination published but source cleanup failed: %w", err)
 		}
-	}
-	if err := os.Rename(tmpDst, dst); err != nil {
-		return fmt.Errorf("source removed but failed to publish destination (temp: %s): %w", tmpDst, err)
 	}
 	return nil
 }
@@ -1340,6 +1363,7 @@ func (s *appState) goToPath() {
 			s.setError("Go to", value, err)
 			return
 		}
+		s.syncShellCwd(a.path)
 		s.updateInfoStatus()
 	})
 }
@@ -1550,6 +1574,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		if err := a.goParentViaList(); err != nil {
 			s.setError("Open", filepath.Dir(a.path), err)
 		} else {
+			s.syncShellCwd(a.path)
 			s.updateInfoStatus()
 		}
 		return nil
@@ -1616,6 +1641,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 			if err := a.historyBack(); err != nil {
 				s.setError("History", a.path, err)
 			} else {
+				s.syncShellCwd(a.path)
 				s.updateInfoStatus()
 			}
 			return nil
@@ -1623,6 +1649,7 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 			if err := a.historyForward(); err != nil {
 				s.setError("History", a.path, err)
 			} else {
+				s.syncShellCwd(a.path)
 				s.updateInfoStatus()
 			}
 			return nil
