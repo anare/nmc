@@ -134,6 +134,20 @@ func TestCopyMoveDirectoryDestinationGuards(t *testing.T) {
 		}
 	})
 
+	t.Run("copy and move reject identical paths", func(t *testing.T) {
+		root := t.TempDir()
+		srcFile := filepath.Join(root, "same.txt")
+		if err := os.WriteFile(srcFile, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := copyPath(srcFile, srcFile); err == nil {
+			t.Fatalf("expected error for copyPath with identical source and destination")
+		}
+		if err := movePath(srcFile, srcFile); err == nil {
+			t.Fatalf("expected error for movePath with identical source and destination")
+		}
+	})
+
 	t.Run("copy and move non-descendant work", func(t *testing.T) {
 		root := t.TempDir()
 		srcDir := filepath.Join(root, "src")

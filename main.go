@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +19,8 @@ import (
 )
 
 const (
-	escTimeoutRune  = '\U0010ffff'
-	searchResetRune = '\U0010fffe'
-	maxViewSize     = 512 * 1024
+	escTimeoutRune = '\U0010ffff'
+	maxViewSize    = 512 * 1024
 )
 
 var (
@@ -442,22 +440,20 @@ func (p *panel) updateTitle() {
 }
 
 type appState struct {
-	app         *tview.Application
-	pages       *tview.Pages
-	panels      [2]*panel
-	active      int
-	status      *tview.TextView
-	escPending  bool
-	escTimer    *time.Timer
-	passEsc     bool
-	searchQuery string
-	searchTimer *time.Timer
-	shellCmd    *exec.Cmd
-	shellIn     io.WriteCloser
-	shellView   *tview.TextView
-	shellInput  *tview.InputField
-	shellMu     sync.Mutex
-	cmdInput    *tview.InputField
+	app        *tview.Application
+	pages      *tview.Pages
+	panels     [2]*panel
+	active     int
+	status     *tview.TextView
+	escPending bool
+	escTimer   *time.Timer
+	passEsc    bool
+	shellCmd   *exec.Cmd
+	shellIn    io.WriteCloser
+	shellView  *tview.TextView
+	shellInput *tview.InputField
+	shellMu    sync.Mutex
+	cmdInput   *tview.InputField
 }
 
 func (s *appState) setStatus(msg string) {
@@ -656,11 +652,11 @@ func (s *appState) startShell() error {
 }
 
 func (s *appState) streamShellOutput(r io.Reader) {
-	reader := bufio.NewReader(r)
+	buf := make([]byte, 1024)
 	for {
-		line, err := reader.ReadString('\n')
-		if line != "" {
-			content := line
+		n, err := r.Read(buf)
+		if n > 0 {
+			content := string(buf[:n])
 			s.app.QueueUpdateDraw(func() {
 				s.appendShellOutput(content)
 			})
@@ -1032,6 +1028,9 @@ func copyFile(src, dst string, mode os.FileMode) error {
 }
 
 func copyPath(src, dst string) error {
+	if src == dst {
+		return fmt.Errorf("source and destination are identical")
+	}
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -1093,6 +1092,9 @@ func copyPath(src, dst string) error {
 }
 
 func movePath(src, dst string) error {
+	if src == dst {
+		return fmt.Errorf("source and destination are identical")
+	}
 	if srcInfo, err := os.Lstat(src); err == nil && srcInfo.IsDir() && isPathInside(src, dst) {
 		return fmt.Errorf("destination is inside source")
 	}
@@ -1387,28 +1389,9 @@ func (s *appState) handleEscSequence(event *tcell.EventKey) bool {
 	return false
 }
 
-func (s *appState) clearSearch() {
-	s.searchQuery = ""
-}
-
-func (s *appState) appendSearch(r rune) {
-	s.searchQuery += strings.ToLower(string(r))
-	if s.searchTimer != nil {
-		s.searchTimer.Stop()
-	}
-	s.searchTimer = time.AfterFunc(1200*time.Millisecond, func() {
-		s.app.QueueEvent(tcell.NewEventKey(tcell.KeyRune, searchResetRune, tcell.ModNone))
-	})
-	if ok := s.activePanel().search(s.searchQuery); !ok {
-		s.setStatus("Search: " + s.searchQuery + " (no match)")
-	} else {
-		s.updateInfoStatus()
-	}
-}
-
 func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 	if s.overlayVisible() {
-		if event.Key() == tcell.KeyRune && (event.Rune() == escTimeoutRune || event.Rune() == searchResetRune) {
+		if event.Key() == tcell.KeyRune && event.Rune() == escTimeoutRune {
 			return nil
 		}
 		s.resetEscState()
@@ -1421,11 +1404,6 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		}
 		return nil
 	}
-	if event.Key() == tcell.KeyRune && event.Rune() == searchResetRune {
-		s.clearSearch()
-		return nil
-	}
-
 	if s.handleEscSequence(event) {
 		return nil
 	}
@@ -1599,7 +1577,7 @@ func run() error {
 
 	status := tview.NewTextView().
 		SetDynamicColors(true).
-		SetText(" Tab switch | F3 view F4 edit F5 copy F6 move F7 mkdir F8 delete F10 quit | Ctrl+R refresh Ctrl+S search Ctrl+H hidden Ctrl+G goto Ctrl+O shell ")
+		SetText(" Tab switch | Type goes to cmd line; Enter runs cmd when non-empty | F3/F4/F5/F6/F7/F8/F10 | Ctrl+R refresh Ctrl+S search Ctrl+O shell F9 sort ")
 	status.SetBorder(true)
 	status.SetTitle(" Keys/Status ")
 	status.SetBackgroundColor(mcPanelBackground)
