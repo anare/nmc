@@ -655,6 +655,45 @@ func cmdQuote(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
 }
 
+func splitCommandLine(command string) ([]string, error) {
+	var parts []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+	escaped := false
+	flush := func() {
+		if current.Len() > 0 {
+			parts = append(parts, current.String())
+			current.Reset()
+		}
+	}
+	for _, r := range command {
+		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+		case r == '\\' && !inSingle:
+			escaped = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
+			flush()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if escaped || inSingle || inDouble {
+		return nil, fmt.Errorf("invalid quoting in command")
+	}
+	flush()
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("empty command")
+	}
+	return parts, nil
+}
+
 func runExternal(command string, args ...string) error {
 	cmd := exec.Command(command, args...)
 	cmd.Stdin = os.Stdin
@@ -674,13 +713,14 @@ func (s *appState) editSelected() {
 	if strings.TrimSpace(editor) == "" {
 		editor = "vi"
 	}
+	parts, splitErr := splitCommandLine(editor)
+	if splitErr != nil {
+		s.setError("Edit", item.path, splitErr)
+		return
+	}
 	var cmdErr error
 	s.app.Suspend(func() {
-		if runtime.GOOS == "windows" {
-			cmdErr = runExternal("cmd", "/c", editor+" "+cmdQuote(item.path))
-			return
-		}
-		cmdErr = runExternal("sh", "-c", editor+" "+shellSingleQuote(item.path))
+		cmdErr = runExternal(parts[0], append(parts[1:], item.path)...)
 	})
 	if cmdErr != nil {
 		s.setError("Edit", item.path, cmdErr)
@@ -695,8 +735,7 @@ func openFileDefault(path string) error {
 	case "darwin":
 		return runExternal("open", path)
 	case "windows":
-		quoted := `"` + strings.ReplaceAll(path, `"`, `""`) + `"`
-		return runExternal("cmd", "/c", "start", "", quoted)
+		return runExternal("rundll32", "url.dll,FileProtocolHandler", path)
 	default:
 		return runExternal("xdg-open", path)
 	}
@@ -759,8 +798,16 @@ func copyPath(src, dst string) error {
 		if linkErr != nil {
 			return linkErr
 		}
-		if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
-			return err
+		if dstInfo, statErr := os.Lstat(dst); statErr == nil {
+			if dstInfo.IsDir() && dstInfo.Mode()&os.ModeSymlink == 0 {
+				if err := os.RemoveAll(dst); err != nil {
+					return err
+				}
+			} else if err := os.Remove(dst); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(statErr) {
+			return statErr
 		}
 		return os.Symlink(target, dst)
 	}
@@ -792,6 +839,17 @@ func movePath(src, dst string) error {
 		if !errors.As(err, &linkErr) || !errors.Is(linkErr.Err, syscall.EXDEV) {
 			return err
 		}
+	}
+	if dstInfo, err := os.Lstat(dst); err == nil {
+		if dstInfo.IsDir() && dstInfo.Mode()&os.ModeSymlink == 0 {
+			if err := os.RemoveAll(dst); err != nil {
+				return err
+			}
+		} else if err := os.Remove(dst); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	if err := copyPath(src, dst); err != nil {
 		return err
