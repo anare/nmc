@@ -474,6 +474,10 @@ type appState struct {
 	shellView  *tview.TextView
 	shellMu    sync.Mutex
 	shellGone  bool
+	termEsc    bool
+	termCSI    bool
+	termOSC    bool
+	termOSCEsc bool
 	cmdInput   *tview.InputField
 }
 
@@ -821,15 +825,73 @@ func (s *appState) streamShellOutput(r io.Reader) {
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			content := string(buf[:n])
+			content := s.sanitizeTerminalOutput(buf[:n])
 			s.app.QueueUpdateDraw(func() {
-				s.appendShellOutput(content)
+				if content != "" {
+					s.appendShellOutput(content)
+				}
 			})
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+func (s *appState) sanitizeTerminalOutput(data []byte) string {
+	var out strings.Builder
+	for _, b := range data {
+		if s.termOSC {
+			if s.termOSCEsc {
+				s.termOSCEsc = false
+				if b == '\\' {
+					s.termOSC = false
+					s.termEsc = false
+				}
+				continue
+			}
+			if b == 0x07 { // BEL
+				s.termOSC = false
+				s.termEsc = false
+				continue
+			}
+			if b == 0x1b { // ESC
+				s.termOSCEsc = true
+			}
+			continue
+		}
+		if s.termCSI {
+			if b >= 0x40 && b <= 0x7E {
+				s.termCSI = false
+				s.termEsc = false
+			}
+			continue
+		}
+		if s.termEsc {
+			switch b {
+			case '[':
+				s.termCSI = true
+			case ']':
+				s.termOSC = true
+			default:
+				s.termEsc = false
+			}
+			continue
+		}
+		switch b {
+		case 0x1b: // ESC
+			s.termEsc = true
+		case '\r':
+			out.WriteByte('\n')
+		case '\n', '\t':
+			out.WriteByte(b)
+		default:
+			if b >= 0x20 {
+				out.WriteByte(b)
+			}
+		}
+	}
+	return out.String()
 }
 
 func (s *appState) markShellExited() {
@@ -1886,7 +1948,7 @@ func run() error {
 		switch key {
 		case tcell.KeyEnter:
 			state.executeCommandLine()
-		case tcell.KeyEsc:
+		case tcell.KeyESC:
 			state.resetEscState()
 			state.styleCommandLine(false)
 			app.SetFocus(state.activePanel().list)
