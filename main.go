@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -464,8 +466,8 @@ func (s *appState) executeCommandLine() {
 	if s.cmdInput == nil {
 		return
 	}
-	cmd := strings.TrimSpace(s.cmdInput.GetText())
-	if cmd == "" {
+	raw := s.cmdInput.GetText()
+	if strings.TrimSpace(raw) == "" {
 		return
 	}
 	s.cmdInput.SetText("")
@@ -473,13 +475,13 @@ func (s *appState) executeCommandLine() {
 		s.setStatus("Shell is not available")
 		return
 	}
-	s.appendShellOutput("$ " + cmd + "\n")
-	_, err := io.WriteString(s.shellIn, cmd+"\n")
+	s.appendShellOutput("$ " + raw + "\n")
+	_, err := io.WriteString(s.shellIn, raw+"\n")
 	if err != nil {
-		s.setError("Command", cmd, err)
+		s.setError("Command", raw, err)
 		return
 	}
-	s.setStatus("Command sent: " + cmd)
+	s.setStatus("Command sent: " + strings.TrimSpace(raw))
 }
 
 func (s *appState) appendCommandRune(r rune) {
@@ -619,18 +621,7 @@ func (s *appState) shellPageVisible() bool {
 }
 
 func (s *appState) startShell() error {
-	shell := os.Getenv("SHELL")
-	if strings.TrimSpace(shell) == "" {
-		if runtime.GOOS == "windows" {
-			shell = os.Getenv("COMSPEC")
-			if strings.TrimSpace(shell) == "" {
-				shell = "cmd.exe"
-			}
-		}
-		if strings.TrimSpace(shell) == "" && runtime.GOOS != "windows" {
-			shell = "sh"
-		}
-	}
+	shell := defaultUserShell()
 	cmd := exec.Command(shell)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -652,6 +643,40 @@ func (s *appState) startShell() error {
 	go s.streamShellOutput(stdout)
 	go s.streamShellOutput(stderr)
 	return nil
+}
+
+func defaultUserShell() string {
+	if runtime.GOOS == "windows" {
+		if shell := strings.TrimSpace(os.Getenv("COMSPEC")); shell != "" {
+			return shell
+		}
+		return "cmd.exe"
+	}
+	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
+		return shell
+	}
+	uid := strconv.Itoa(os.Getuid())
+	passwd, err := os.ReadFile("/etc/passwd")
+	if err == nil {
+		scanner := bufio.NewScanner(strings.NewReader(string(passwd)))
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
+				continue
+			}
+			parts := strings.Split(line, ":")
+			if len(parts) < 7 {
+				continue
+			}
+			if parts[2] == uid && strings.TrimSpace(parts[6]) != "" {
+				return strings.TrimSpace(parts[6])
+			}
+		}
+	}
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		return "/bin/bash"
+	}
+	return "/bin/sh"
 }
 
 func (s *appState) streamShellOutput(r io.Reader) {
@@ -1109,7 +1134,7 @@ func movePath(src, dst string) error {
 		return err
 	}
 	var backupDst string
-	if dstInfo, err := os.Lstat(dst); err == nil {
+	if _, err := os.Lstat(dst); err == nil {
 		backupDst = fmt.Sprintf("%s.nmc-backup-%d", dst, time.Now().UnixNano())
 		if err := os.Rename(dst, backupDst); err != nil {
 			_ = os.RemoveAll(tmpDst)
@@ -1336,7 +1361,7 @@ func (s *appState) showHelp() {
 		"Arrows/PgUp/PgDn/Home/End: navigate",
 		"Enter/Right: open directory or launch file",
 		"Left: go to parent directory",
-		"Space/Insert: mark item",
+		"Ctrl+T/Insert: mark item and move caret",
 		"+: select all    -: clear selection    *: invert selection",
 		"Ctrl+R: refresh   Ctrl+S: search prompt   Ctrl+H: toggle hidden",
 		"Ctrl+G: go to path    [: history back    ]: history forward",
@@ -1359,7 +1384,7 @@ func (s *appState) showUserMenu() {
 		"Use function keys and shortcuts:",
 		"- F3/F4/F5/F6/F7/F8/F10",
 		"- Ctrl+R, Ctrl+S(search), Ctrl+H, Ctrl+G, Ctrl+L, Ctrl+O",
-		"- Selection with Space/Insert/+/-/*",
+		"- Selection with Ctrl+T/Insert/+/-/*",
 		"- Type to bottom command line, press Enter to send to shell",
 	}, "\n")
 	s.showText("F2 User Menu", menu)
@@ -1505,8 +1530,9 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 	case tcell.KeyCtrlO:
 		s.toggleShellPage()
 		return nil
-	case tcell.KeyInsert:
+	case tcell.KeyCtrlT, tcell.KeyInsert:
 		a.toggleMarkCurrent()
+		a.move(1)
 		s.stylePanels()
 		s.updateInfoStatus()
 		return nil
@@ -1524,11 +1550,6 @@ func (s *appState) keyHandler(event *tcell.EventKey) *tcell.EventKey {
 		s.escPending = false
 		r := event.Rune()
 		switch r {
-		case ' ':
-			a.toggleMarkCurrent()
-			s.stylePanels()
-			s.updateInfoStatus()
-			return nil
 		case '+':
 			a.selectAll()
 			s.stylePanels()
