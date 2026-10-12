@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/anare/nmc/internal/vfs"
 	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -123,7 +125,7 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 		return err
 	}
 
-	entries, err := os.ReadDir(absPath)
+	entries, err := vfs.NewLocal().List(context.Background(), absPath)
 	if err != nil {
 		return err
 	}
@@ -132,30 +134,26 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 		p.marked = map[string]bool{}
 	}
 
-	items := make([]listItem, 0, len(entries)+1)
+	items := make([]listItem, 0, len(entries))
 	parent := filepath.Dir(absPath)
-	if parent != absPath || runtime.GOOS == "windows" {
-		items = append(items, listItem{name: "..", path: parent, isDir: true})
-	}
-
 	for _, e := range entries {
-		name := e.Name()
+		name := e.Name
+		if e.IsUp {
+			items = append(items, listItem{name: "..", path: parent, isDir: true})
+			continue
+		}
 		if !p.showHidden && strings.HasPrefix(name, ".") {
 			continue
 		}
 		fullPath := filepath.Join(absPath, name)
-		info, infoErr := e.Info()
-		if infoErr != nil {
-			continue
-		}
 		items = append(items, listItem{
 			name:    name,
 			path:    fullPath,
-			isDir:   e.IsDir(),
-			size:    info.Size(),
-			modTime: info.ModTime(),
+			isDir:   e.IsDir,
+			size:    e.Size,
+			modTime: e.ModTime,
 			ext:     strings.ToLower(filepath.Ext(name)),
-			mode:    info.Mode(),
+			mode:    e.Mode,
 		})
 	}
 
