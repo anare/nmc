@@ -12,6 +12,7 @@ import (
 	"github.com/anare/nmc/internal/dialog"
 	"github.com/anare/nmc/internal/editor"
 	"github.com/anare/nmc/internal/fileop"
+	"github.com/anare/nmc/internal/git"
 	"github.com/anare/nmc/internal/history"
 	"github.com/anare/nmc/internal/panel"
 	"github.com/anare/nmc/internal/shell"
@@ -309,7 +310,11 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 	case tcell.KeyF8:
 		a.confirmDelete()
 	case tcell.KeyF3:
-		a.openViewer()
+		if entry, ok := active.Selected(); ok && entry.IsUp {
+			a.openGitHistory()
+		} else {
+			a.openViewer()
+		}
 	case tcell.KeyF4:
 		a.openEditor()
 	case tcell.KeyF18:
@@ -327,6 +332,8 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 				a.promptLink(false)
 			case 'e':
 				a.editLink()
+			case 'g':
+				a.openGitHistory()
 			}
 		} else if event.Modifiers() == tcell.ModNone && event.Rune() >= ' ' {
 			a.cmd.HandleKey(event)
@@ -778,6 +785,70 @@ func (a *App) closeEditor() {
 		case 1:
 			a.editor = nil
 		}
+	})
+}
+
+func (a *App) openGitHistory() {
+	p := a.panels[a.active]
+	if p.FS.Name() != "" {
+		a.dialog = dialog.NewMessage("Git history", []string{"Git history is available only for local panels."}, true)
+		return
+	}
+	path := p.CurrentPath()
+	if entry, ok := p.Selected(); !ok || entry.IsUp {
+		path = p.Cwd
+	}
+	ctx := context.Background()
+	root, err := git.Root(ctx, p.Cwd)
+	if err != nil {
+		a.dialog = dialog.NewMessage("Git history", []string{err.Error()}, true)
+		return
+	}
+	commits, err := git.Log(ctx, root, path, 300)
+	if err != nil {
+		a.dialog = dialog.NewMessage("Git history", []string{err.Error()}, true)
+		return
+	}
+	status, err := git.CurrentStatus(ctx, root)
+	if err != nil {
+		a.dialog = dialog.NewMessage("Git history", []string{err.Error()}, true)
+		return
+	}
+	type choice struct {
+		hash        string
+		uncommitted bool
+	}
+	choices := make([]choice, 0, len(commits)+1)
+	items := make([]string, 0, len(commits)+1)
+	if len(status.Staged)+len(status.Modified)+len(status.Untracked) > 0 {
+		items = append(items, "* working tree — uncommitted changes")
+		choices = append(choices, choice{uncommitted: true})
+	}
+	for _, commit := range commits {
+		items = append(items, fmt.Sprintf("%s  %s  %s", commit.Short, commit.When.Format("2006-01-02"), commit.Subject))
+		choices = append(choices, choice{hash: commit.Hash})
+	}
+	if len(items) == 0 {
+		a.dialog = dialog.NewMessage("Git history", []string{"No commits or working-tree changes."}, false)
+		return
+	}
+	title := fmt.Sprintf("History: %s — %s", path, git.Describe(ctx, root))
+	a.dialog = dialog.NewPicker(title, items, func(result dialog.Result) {
+		if !result.OK() || result.Selected < 0 || result.Selected >= len(choices) {
+			return
+		}
+		var data []byte
+		var err error
+		if choices[result.Selected].uncommitted {
+			data, err = git.Diff(ctx, root, path)
+		} else {
+			data, err = git.Show(ctx, root, choices[result.Selected].hash, path)
+		}
+		if err != nil {
+			a.dialog = dialog.NewMessage("Git diff", []string{err.Error()}, true)
+			return
+		}
+		a.viewer = viewer.FromBytesAs(items[result.Selected], "commit.diff", data)
 	})
 }
 

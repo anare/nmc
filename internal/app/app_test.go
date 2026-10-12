@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -368,6 +370,36 @@ func TestRenameCreateAndEditSymbolicLinkFlows(t *testing.T) {
 	}
 	if _, err := fs.Stat(context.Background(), "/shortcut.txt"); err == nil {
 		t.Fatal("edit link left the previous link path")
+	}
+}
+
+func TestF3OnParentShowsLocalGitHistory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	run := func(args ...string) {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.name", "Test User")
+	run("config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(dir+"/note.txt", []byte("text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "note.txt")
+	run("commit", "-m", "initial import", "-q")
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, vfs.NewLocal(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF3, 0, tcell.ModNone))
+	if a.dialog == nil || a.dialog.Title == "" || len(a.dialog.Items) == 0 {
+		t.Fatalf("F3 on parent did not open Git history: dialog=%#v status=%q", a.dialog, a.status)
 	}
 }
 
