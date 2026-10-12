@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/anare/nmc/internal/dialog"
 	"github.com/anare/nmc/internal/editor"
@@ -25,22 +27,23 @@ const (
 )
 
 type App struct {
-	screen     tcell.Screen
-	panels     [2]*panel.Panel
-	active     int
-	theme      ui.Theme
-	status     string
-	quit       bool
-	dialog     *dialog.Dialog
-	cmd        *dialog.TextInput
-	output     *shell.Buffer
-	opCancel   context.CancelFunc
-	viewer     *viewer.Viewer
-	editor     *editor.Editor
-	history    *history.Store
-	cmdHistory *history.Cursor
-	job        *shell.Job
-	commandCtx context.CancelFunc
+	screen       tcell.Screen
+	panels       [2]*panel.Panel
+	active       int
+	theme        ui.Theme
+	status       string
+	quit         bool
+	ctrlXPending bool
+	dialog       *dialog.Dialog
+	cmd          *dialog.TextInput
+	output       *shell.Buffer
+	opCancel     context.CancelFunc
+	viewer       *viewer.Viewer
+	editor       *editor.Editor
+	history      *history.Store
+	cmdHistory   *history.Cursor
+	job          *shell.Job
+	commandCtx   context.CancelFunc
 }
 
 func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
@@ -196,6 +199,22 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		a.handleEditorKey(event)
 		return
 	}
+	if a.ctrlXPending {
+		a.ctrlXPending = false
+		if event.Key() == tcell.KeyRune {
+			switch event.Rune() {
+			case 's':
+				a.promptLink(false)
+			case 'l':
+				a.promptLink(true)
+			case 'e':
+				a.editLink()
+			default:
+				a.status = "Ctrl-X: s symbolic link, l hard link, e edit link"
+			}
+		}
+		return
+	}
 	a.status = ""
 	active := a.panels[a.active]
 	if event.Key() == tcell.KeyEnter && a.cmd.Empty() {
@@ -239,6 +258,9 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		return
 	}
 	switch event.Key() {
+	case tcell.KeyCtrlX:
+		a.ctrlXPending = true
+		a.status = "Ctrl-X: s symbolic link, l hard link, e edit link"
 	case tcell.KeyTab, tcell.KeyBacktab:
 		a.active = 1 - a.active
 	case tcell.KeyUp:
@@ -290,8 +312,23 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		a.openViewer()
 	case tcell.KeyF4:
 		a.openEditor()
+	case tcell.KeyF18:
+		a.rename()
+	case tcell.KeyF16:
+		a.editLink()
+	case tcell.KeyF17:
+		a.promptLink(false)
 	case tcell.KeyRune:
-		if event.Modifiers() == tcell.ModNone && event.Rune() >= ' ' {
+		if event.Modifiers()&tcell.ModAlt != 0 {
+			switch event.Rune() {
+			case 'r':
+				a.rename()
+			case 'l':
+				a.promptLink(false)
+			case 'e':
+				a.editLink()
+			}
+		} else if event.Modifiers() == tcell.ModNone && event.Rune() >= ' ' {
 			a.cmd.HandleKey(event)
 		}
 	}
@@ -464,6 +501,177 @@ func (a *App) confirmDelete() {
 			a.launchOperation(fileop.Operation{Op: "Delete", Paths: paths, SrcFS: p.FS})
 		}
 	})
+}
+
+func (a *App) rename() {
+	p := a.panels[a.active]
+	targets := p.Targets()
+	if len(targets) != 1 {
+		a.status = "Rename requires exactly one selected item"
+		return
+	}
+	source := targets[0]
+	entry, err := p.FS.Stat(context.Background(), source)
+	if err != nil {
+		a.dialog = dialog.NewMessage("Rename", []string{err.Error()}, true)
+		return
+	}
+	a.dialog = dialog.NewInput("Rename", "New name: ", entry.Name, func(result dialog.Result) {
+		if !result.OK() || result.Text == "" {
+			return
+		}
+		destination := result.Text
+		if !p.FS.IsAbs(destination) {
+			destination = p.FS.Join(p.Cwd, destination)
+		}
+		if destination == source {
+			return
+		}
+		rename := func() {
+			if err := p.FS.Rename(context.Background(), source, destination); err != nil {
+				a.dialog = dialog.NewMessage("Rename", []string{err.Error()}, true)
+				return
+			}
+			_ = p.Reload(context.Background())
+			a.status = "Renamed"
+		}
+		if _, err := p.FS.Stat(context.Background(), destination); err == nil {
+			a.dialog = dialog.NewConfirm("Replace?", []string{"The destination already exists. Replace it?"}, []string{"Replace", "Cancel"}, func(result dialog.Result) {
+				if result.OK() {
+					rename()
+				}
+			})
+		} else if !errors.Is(err, os.ErrNotExist) {
+			a.dialog = dialog.NewMessage("Rename", []string{err.Error()}, true)
+		} else {
+			rename()
+		}
+	})
+}
+
+func (a *App) promptLink(hard bool) {
+	p := a.panels[a.active]
+	entry, ok := p.Selected()
+	if !ok || entry.IsUp {
+		a.status = "Select a source for the link"
+		return
+	}
+	source := p.CurrentPath()
+	if hard {
+		if entry.IsDir {
+			a.dialog = dialog.NewMessage("Hard link", []string{"Hard links to directories are not supported."}, true)
+			return
+		}
+		if _, err := p.FS.Stat(context.Background(), source); err != nil {
+			a.dialog = dialog.NewMessage("Hard link", []string{"The hard-link target must exist.", err.Error()}, true)
+			return
+		}
+	}
+	defaultDir := p.Cwd
+	other := a.panels[1-a.active]
+	if sameFilesystem(p.FS, other.FS) {
+		defaultDir = other.Cwd
+	}
+	kind := "Symbolic link"
+	if hard {
+		kind = "Hard link"
+	}
+	a.dialog = dialog.NewInput(kind, "Link name: ", p.FS.Join(defaultDir, entry.Name), func(result dialog.Result) {
+		if !result.OK() || result.Text == "" {
+			return
+		}
+		link := result.Text
+		if !p.FS.IsAbs(link) {
+			link = p.FS.Join(p.Cwd, link)
+		}
+		var err error
+		if hard {
+			err = p.FS.Link(context.Background(), source, link)
+		} else {
+			err = p.FS.Symlink(context.Background(), source, link)
+		}
+		if err != nil {
+			a.dialog = dialog.NewMessage(kind, []string{err.Error()}, true)
+			return
+		}
+		_ = p.Reload(context.Background())
+		a.status = kind + " created"
+	})
+}
+
+func (a *App) editLink() {
+	p := a.panels[a.active]
+	entry, ok := p.Selected()
+	if !ok || !entry.IsLink || entry.IsUp {
+		a.status = "Select a symbolic link"
+		return
+	}
+	oldPath := p.CurrentPath()
+	target, err := p.FS.Readlink(context.Background(), oldPath)
+	if err != nil {
+		a.dialog = dialog.NewMessage("Edit link", []string{err.Error()}, true)
+		return
+	}
+	a.dialog = dialog.NewInput("Edit symbolic link", "Target: ", target, func(targetResult dialog.Result) {
+		if !targetResult.OK() || targetResult.Text == "" {
+			return
+		}
+		a.dialog = dialog.NewInput("Edit symbolic link", "Link name: ", oldPath, func(pathResult dialog.Result) {
+			if !pathResult.OK() || pathResult.Text == "" {
+				return
+			}
+			newPath := pathResult.Text
+			if !p.FS.IsAbs(newPath) {
+				newPath = p.FS.Join(p.Cwd, newPath)
+			}
+			apply := func() {
+				temp := p.FS.Join(p.FS.Dir(newPath), fmt.Sprintf(".bc-link-%d", time.Now().UnixNano()))
+				if err := p.FS.Symlink(context.Background(), targetResult.Text, temp); err != nil {
+					a.dialog = dialog.NewMessage("Edit link", []string{err.Error()}, true)
+					return
+				}
+				if err := p.FS.Rename(context.Background(), temp, newPath); err != nil {
+					_ = p.FS.Remove(context.Background(), temp)
+					a.dialog = dialog.NewMessage("Edit link", []string{err.Error()}, true)
+					return
+				}
+				if newPath != oldPath {
+					if err := p.FS.Remove(context.Background(), oldPath); err != nil {
+						a.dialog = dialog.NewMessage("Edit link", []string{err.Error()}, true)
+						return
+					}
+				}
+				_ = p.Reload(context.Background())
+				a.status = "Link updated"
+			}
+			if newPath == oldPath {
+				apply()
+				return
+			}
+			if _, err := p.FS.Stat(context.Background(), newPath); err == nil {
+				a.dialog = dialog.NewConfirm("Replace?", []string{"The destination already exists. Replace it?"}, []string{"Replace", "Cancel"}, func(result dialog.Result) {
+					if result.OK() {
+						apply()
+					}
+				})
+			} else if !errors.Is(err, os.ErrNotExist) {
+				a.dialog = dialog.NewMessage("Edit link", []string{err.Error()}, true)
+			} else {
+				apply()
+			}
+		})
+	})
+}
+
+func sameFilesystem(a, b vfs.FS) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if a.Name() == "" || b.Name() == "" {
+		return a.Name() == "" && b.Name() == ""
+	}
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	return va.Type() == vb.Type() && va.Type().Comparable() && va.Interface() == vb.Interface()
 }
 
 func (a *App) openViewer() {

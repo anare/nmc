@@ -325,6 +325,60 @@ func TestF4EditsAndPromptsBeforeDiscardingChanges(t *testing.T) {
 	}
 }
 
+func TestRenameCreateAndEditSymbolicLinkFlows(t *testing.T) {
+	screen := newTestScreen(t, 80, 24)
+	fs := vfs.NewMemFS("test")
+	fs.PutFile("/original.txt", []byte("value"), 0o644)
+	a, err := New(screen, fs, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'r', tcell.ModAlt))
+	replaceInput(a, "/renamed.txt")
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if _, err := fs.Stat(context.Background(), "/original.txt"); err == nil {
+		t.Fatal("rename left the original path")
+	}
+	if _, err := fs.Stat(context.Background(), "/renamed.txt"); err != nil {
+		t.Fatalf("rename destination is missing: %v", err)
+	}
+
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'l', tcell.ModAlt))
+	replaceInput(a, "/shortcut.txt")
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	entry, err := fs.Stat(context.Background(), "/shortcut.txt")
+	if err != nil || !entry.IsLink || entry.Target != "/renamed.txt" {
+		t.Fatalf("created link = %+v err=%v", entry, err)
+	}
+
+	for index, entry := range a.panels[0].Entries {
+		if entry.Name == "shortcut.txt" {
+			a.panels[0].MoveTo(index)
+			break
+		}
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF16, 0, tcell.ModNone))
+	replaceInput(a, "/new-target.txt")
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	replaceInput(a, "/shortcut-new.txt")
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	entry, err = fs.Stat(context.Background(), "/shortcut-new.txt")
+	if err != nil || !entry.IsLink || entry.Target != "/new-target.txt" {
+		t.Fatalf("edited link = %+v err=%v", entry, err)
+	}
+	if _, err := fs.Stat(context.Background(), "/shortcut.txt"); err == nil {
+		t.Fatal("edit link left the previous link path")
+	}
+}
+
+func replaceInput(a *App, text string) {
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlK, 0, tcell.ModCtrl))
+	for _, value := range text {
+		a.HandleKey(tcell.NewEventKey(tcell.KeyRune, value, tcell.ModNone))
+	}
+}
+
 func newTestScreen(t *testing.T, width, height int) tcell.SimulationScreen {
 	t.Helper()
 	screen := tcell.NewSimulationScreen("UTF-8")
