@@ -99,8 +99,10 @@ the moment the command starts, before the program has written anything.
 
 ## The gate scripts
 
-`plan/gates/phase-NN.sh`, driven by `plan/run.sh`. Each is a list of
-assertions:
+`plan/gates/phase-NN.sh`, driven by `plan/run.sh`. Each selects behavioural
+tests for its phase, checks its key source files, and requests a build and
+full-suite run. The runner caches the build and full suite once per invocation
+even though each phase asks for them. For example:
 
 ```bash
 need_file   internal/git/git.go
@@ -119,7 +121,8 @@ green phase red. It once printed "every phase is complete" directly above
 `need_suite` keeps the output when it fails. A gate that fails without
 saying why turns a flake into a mystery.
 
-`STATUS.md` is regenerated from the gates, so it cannot drift from reality.
+`plan/STATUS.md` is regenerated from the selected gates, so it cannot drift
+from the most recent run.
 
 ### Gates earn their keep
 

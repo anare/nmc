@@ -61,3 +61,9 @@ Each phase in the build order has a gate script that decides it. A phase is
 finished when its gate passes and `make check` is clean. The gates are not
 decoration: three of them caught regressions in the original build that the
 author had not noticed.
+
+Run all sixteen gates with `./plan/run.sh`, or select phases with
+`./plan/run.sh 8` and ranges with `./plan/run.sh 8-10`. The run writes the
+selected results to [plan/STATUS.md](../plan/STATUS.md), caching the full build
+and test suite for that invocation. `make help` lists the build and check
+targets.
