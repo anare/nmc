@@ -133,11 +133,8 @@ func (m *MemFS) List(ctx context.Context, dir string) ([]Entry, error) {
 		if rest == "" || strings.Contains(rest, "/") {
 			continue
 		}
-		entry := node.entry
+		entry := m.entryLocked(name, node)
 		entry.Name = rest
-		if node.content != nil {
-			entry.Size = int64(len(node.content.data))
-		}
 		result = append(result, entry)
 	}
 	return result, nil
@@ -154,6 +151,10 @@ func (m *MemFS) Stat(ctx context.Context, name string) (Entry, error) {
 	if !ok {
 		return Entry{}, os.ErrNotExist
 	}
+	return m.entryLocked(name, node), nil
+}
+
+func (m *MemFS) entryLocked(name string, node *memNode) Entry {
 	entry := node.entry
 	entry.Name = path.Base(name)
 	if node.content != nil {
@@ -166,11 +167,13 @@ func (m *MemFS) Stat(ctx context.Context, name string) (Entry, error) {
 		}
 		if targetNode, exists := m.nodes[m.clean(target)]; exists {
 			entry.IsDir = targetNode.entry.IsDir
+			entry.Broken = false
 		} else {
+			entry.IsDir = false
 			entry.Broken = true
 		}
 	}
-	return entry, nil
+	return entry
 }
 
 func (m *MemFS) Open(ctx context.Context, name string) (io.ReadCloser, error) {
@@ -208,6 +211,10 @@ func (m *MemFS) Create(ctx context.Context, name string, mode os.FileMode) (io.W
 	}
 	name = m.clean(name)
 	m.mu.Lock()
+	if existing, exists := m.nodes[name]; exists && existing.entry.IsDir {
+		m.mu.Unlock()
+		return nil, errors.New("is a directory")
+	}
 	if _, exists := m.nodes[name]; !exists {
 		parent, ok := m.nodes[path.Dir(name)]
 		if !ok || !parent.entry.IsDir {

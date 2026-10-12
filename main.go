@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/anare/nmc/internal/fileop"
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
@@ -1468,21 +1469,32 @@ func (s *appState) copySelected() {
 		s.setStatus("F5 copy: nothing selected")
 		return
 	}
-	copied := 0
+	eligible := make([]string, 0, len(targets))
 	for _, src := range targets {
 		dst := filepath.Join(b.path, filepath.Base(src))
-		if pathsEqual(src, dst) {
-			continue
+		if !pathsEqual(src, dst) {
+			eligible = append(eligible, src)
 		}
-		if err := copyPath(src, dst); err != nil {
-			s.setError("Copy", src, err)
-			return
-		}
-		copied++
 	}
-	a.clearSelection()
-	s.refreshPanels()
-	s.setStatus(fmt.Sprintf("Copied %d item(s) to %s", copied, b.path))
+	if len(eligible) == 0 {
+		s.setStatus("Copied 0 items")
+		return
+	}
+	pairs, err := fileop.Plan(eligible, b.path)
+	if err != nil {
+		s.setError("Copy", b.path, err)
+		return
+	}
+	result := fileop.Run(context.Background(), fileop.Operation{Op: "Copy", Pairs: pairs}, nil)
+	if result.Items > 0 {
+		a.clearSelection()
+		s.refreshPanels()
+	}
+	if err := result.Err(); err != nil {
+		s.setError("Copy", b.path, err)
+		return
+	}
+	s.setStatus(fmt.Sprintf("Copied %d item(s) to %s", result.Items, b.path))
 }
 
 func (s *appState) moveSelected() {
@@ -1493,21 +1505,32 @@ func (s *appState) moveSelected() {
 		s.setStatus("F6 move: nothing selected")
 		return
 	}
-	moved := 0
+	eligible := make([]string, 0, len(targets))
 	for _, src := range targets {
 		dst := filepath.Join(b.path, filepath.Base(src))
-		if pathsEqual(src, dst) {
-			continue
+		if !pathsEqual(src, dst) {
+			eligible = append(eligible, src)
 		}
-		if err := movePath(src, dst); err != nil {
-			s.setError("Move", src, err)
-			return
-		}
-		moved++
 	}
-	a.clearSelection()
-	s.refreshPanels()
-	s.setStatus(fmt.Sprintf("Moved %d item(s) to %s", moved, b.path))
+	if len(eligible) == 0 {
+		s.setStatus("Moved 0 items")
+		return
+	}
+	pairs, err := fileop.Plan(eligible, b.path)
+	if err != nil {
+		s.setError("Move", b.path, err)
+		return
+	}
+	result := fileop.Run(context.Background(), fileop.Operation{Op: "Move", Pairs: pairs}, nil)
+	if result.Items > 0 {
+		a.clearSelection()
+		s.refreshPanels()
+	}
+	if err := result.Err(); err != nil {
+		s.setError("Move", b.path, err)
+		return
+	}
+	s.setStatus(fmt.Sprintf("Moved %d item(s) to %s", result.Items, b.path))
 }
 
 func (s *appState) makeDirectory() {
