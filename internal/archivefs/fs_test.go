@@ -1,10 +1,12 @@
 package archivefs
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -139,5 +141,51 @@ func TestFilesystemRejectsNonCanonicalAndTraversalPaths(t *testing.T) {
 		if _, err := fs.Stat(context.Background(), name); err == nil {
 			t.Errorf("Stat(%q) accepted noncanonical path", name)
 		}
+	}
+}
+
+func TestDefaultZipHandlerReadsARealArchive(t *testing.T) {
+	if _, err := exec.LookPath("unzip"); err != nil {
+		t.Skip("unzip is not installed")
+	}
+	archive := filepath.Join(t.TempDir(), "sample.zip")
+	file, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	member, err := writer.Create("nested/readme.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := member.Write([]byte("from zip")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var handler handlers.Handler
+	for _, candidate := range handlers.Defaults() {
+		if candidate.Name == "zip" {
+			handler = candidate
+			break
+		}
+	}
+	fs, err := Open(context.Background(), handler, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Close()
+	reader, err := fs.Open(context.Background(), "/nested/readme.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if err != nil || closeErr != nil || string(data) != "from zip" {
+		t.Fatalf("zip contents=%q err=%v closeErr=%v", data, err, closeErr)
 	}
 }
