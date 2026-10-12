@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anare/nmc/internal/history"
 	"github.com/anare/nmc/internal/ui"
 	"github.com/gdamore/tcell/v2"
 )
@@ -112,6 +113,39 @@ func TestPickerFiltersAndReturnsSelectedItem(t *testing.T) {
 	menu.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'b', tcell.ModNone))
 	if menu.Selected != 0 {
 		t.Fatalf("menu unexpectedly filtered to item %d", menu.Selected)
+	}
+}
+
+func TestComboInputHistoryDropdownFilterAndForget(t *testing.T) {
+	store, err := history.Open(t.TempDir() + "/history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Add(history.Host, "alpha.example")
+	store.Add(history.Host, "beta.example")
+	cursor := store.Cursor(history.Host)
+	d := NewComboInput("Connect", "Host: ", "", cursor, nil)
+	d.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	if !d.ComboOpen || len(d.ComboItems) != 2 {
+		t.Fatalf("dropdown state = open:%v items:%v", d.ComboOpen, d.ComboItems)
+	}
+	d.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	d.HandleKey(tcell.NewEventKey(tcell.KeyCtrlD, 0, tcell.ModNone))
+	if got := cursor.Entries(); len(got) != 1 || got[0] != "beta.example" {
+		t.Fatalf("history after forgetting selection = %v", got)
+	}
+	done, result := d.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if !done || result.Text != "beta.example" {
+		t.Fatalf("selection = done:%v result:%+v", done, result)
+	}
+}
+
+func TestPickerFiltersByWholeTypedQuery(t *testing.T) {
+	picker := NewPicker("History", []string{"alpha", "beta", "gamma"}, nil)
+	picker.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'e', tcell.ModNone))
+	done, result := picker.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if !done || result.Text != "beta" || result.Selected != 1 {
+		t.Fatalf("filtered picker result = done %v, %#v", done, result)
 	}
 }
 

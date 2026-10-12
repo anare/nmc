@@ -487,29 +487,31 @@ func (a *App) handleViewerKey(event *tcell.EventKey) {
 			a.viewer.Top = max(0, len(a.viewer.Lines)-1)
 		}
 	case tcell.KeyRune:
-		switch event.Rune() {
-		case 'q':
-			a.viewer = nil
-		case 'w':
-			a.viewer.Wrap = !a.viewer.Wrap
-		case 'h':
-			a.viewer.ToggleHex()
-		case 'r':
-			a.viewer.ToggleRaw()
-		case 'n':
-			a.viewer.NextHit(false)
-		case 'N':
-			a.viewer.NextHit(true)
-		case 'g':
-			a.viewer.Goto(1)
-		case 'G':
-			if a.viewer.Mode == viewer.HexMode {
-				a.viewer.Top = max(0, (len(a.viewer.Data)-1)/16)
-			} else {
-				a.viewer.Top = max(0, len(a.viewer.Lines)-1)
+		if event.Modifiers() == tcell.ModNone {
+			switch event.Rune() {
+			case 'q':
+				a.viewer = nil
+			case 'w':
+				a.viewer.Wrap = !a.viewer.Wrap
+			case 'h':
+				a.viewer.ToggleHex()
+			case 'r':
+				a.viewer.ToggleRaw()
+			case 'n':
+				a.viewer.NextHit(false)
+			case 'N':
+				a.viewer.NextHit(true)
+			case 'g':
+				a.viewer.Goto(1)
+			case 'G':
+				if a.viewer.Mode == viewer.HexMode {
+					a.viewer.Top = max(0, (len(a.viewer.Data)-1)/16)
+				} else {
+					a.viewer.Top = max(0, len(a.viewer.Lines)-1)
+				}
+			case '/':
+				a.promptViewerSearch()
 			}
-		case '/':
-			a.promptViewerSearch()
 		}
 	}
 	if event.Modifiers()&tcell.ModAlt != 0 && event.Rune() == 'n' {

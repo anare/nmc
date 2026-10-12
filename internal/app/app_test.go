@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/anare/nmc/internal/vfs"
+	"github.com/anare/nmc/internal/viewer"
 	"github.com/gdamore/tcell/v2"
 )
 
@@ -175,14 +176,28 @@ func TestF5CopiesAndF8DeletesThroughFileOperationLayer(t *testing.T) {
 		t.Fatalf("copied file contents = %q, err=%v", data, err)
 	}
 
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF6, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl))
+	for _, r := range "/moved.txt" {
+		a.HandleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	waitForOperation(t, a, screen)
+	if _, err := fs.Stat(context.Background(), "/source.txt"); err == nil {
+		t.Fatal("F6 did not remove the moved source")
+	}
+	if _, err := fs.Stat(context.Background(), "/moved.txt"); err != nil {
+		t.Fatalf("F6 did not create the destination: %v", err)
+	}
+
 	a.HandleKey(tcell.NewEventKey(tcell.KeyF8, 0, tcell.ModNone))
 	if a.dialog == nil {
 		t.Fatal("F8 did not ask for delete confirmation")
 	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
 	waitForOperation(t, a, screen)
-	if _, err := fs.Stat(context.Background(), "/source.txt"); err == nil {
-		t.Fatal("F8 did not delete the selected source")
+	if _, err := fs.Stat(context.Background(), "/moved.txt"); err == nil {
+		t.Fatal("F8 did not delete the selected item")
 	}
 }
 
@@ -228,6 +243,26 @@ func TestCommandRunsInBackgroundAndOutputCanBeViewed(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'o', tcell.ModAlt))
 	if a.dialog == nil || !strings.Contains(strings.Join(a.dialog.Lines, "\n"), "hello") {
 		t.Fatal("Alt-O did not show command output")
+	}
+}
+
+func TestViewerAltNOnlyTogglesLineNumbers(t *testing.T) {
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.viewer = viewer.FromBytes("notes.txt", []byte("first\nsecond"))
+	a.viewer.Search("second")
+	a.viewer.Hit = 0
+	a.viewer.Top = 0
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'n', tcell.ModAlt))
+	if !a.viewer.LineNumber || a.viewer.Top != 0 {
+		t.Fatalf("Alt-N changed line-number=%v top=%d", a.viewer.LineNumber, a.viewer.Top)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'n', tcell.ModNone))
+	if a.viewer.Top != 1 {
+		t.Fatalf("plain n top = %d, want next search hit on line 2", a.viewer.Top)
 	}
 }
 

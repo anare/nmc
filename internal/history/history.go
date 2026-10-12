@@ -83,7 +83,7 @@ func (s *Store) Cursor(kind Kind) *Cursor {
 	s.mu.RLock()
 	entries := append([]string(nil), s.entries[kind]...)
 	s.mu.RUnlock()
-	return &Cursor{entries: entries, index: -1}
+	return &Cursor{entries: entries, index: -1, store: s, kind: kind}
 }
 
 func (s *Store) Save() error {
@@ -125,6 +125,39 @@ type Cursor struct {
 	entries []string
 	index   int
 	draft   string
+	store   *Store
+	kind    Kind
+}
+
+func (c *Cursor) Entries() []string {
+	return append([]string(nil), c.entries...)
+}
+
+func (c *Cursor) Forget(value string) (bool, error) {
+	if c.store == nil {
+		return false, nil
+	}
+	c.store.mu.Lock()
+	entries := c.store.entries[c.kind]
+	filtered := make([]string, 0, len(entries))
+	found := false
+	for _, entry := range entries {
+		if entry == value {
+			found = true
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if found {
+		c.store.entries[c.kind] = filtered
+	}
+	c.entries = append(c.entries[:0], filtered...)
+	c.store.mu.Unlock()
+	c.Reset()
+	if !found {
+		return false, nil
+	}
+	return true, c.store.Save()
 }
 
 func (c *Cursor) Prev(current string) string {

@@ -31,22 +31,27 @@ const (
 )
 
 type Dialog struct {
-	Title        string
-	Lines        []string
-	Buttons      []string
-	Error        bool
-	Input        *TextInput
-	Prompt       string
-	Progress     int
-	ProgressInfo string
-	Items        []string
-	Selected     int
-	Filter       bool
-	Offset       int
-	Focused      int
-	mode         mode
-	onCancel     func()
-	OnDone       func(Result)
+	Title         string
+	Lines         []string
+	Buttons       []string
+	Error         bool
+	Input         *TextInput
+	Prompt        string
+	Progress      int
+	ProgressInfo  string
+	Items         []string
+	Selected      int
+	Filter        bool
+	FilterText    string
+	Combo         bool
+	ComboOpen     bool
+	ComboItems    []string
+	ComboSelected int
+	Offset        int
+	Focused       int
+	mode          mode
+	onCancel      func()
+	OnDone        func(Result)
 }
 
 func NewMessage(title string, lines []string, isError bool) *Dialog {
@@ -88,6 +93,10 @@ func NewInput(title, prompt, initial string, onDone func(Result)) *Dialog {
 func NewComboInput(title, prompt, initial string, cursor *history.Cursor, onDone func(Result)) *Dialog {
 	dialog := NewInput(title, prompt, initial, onDone)
 	dialog.Input.WithHistory(cursor)
+	dialog.Combo = true
+	if cursor != nil {
+		dialog.ComboItems = cursor.Entries()
+	}
 	return dialog
 }
 
@@ -102,6 +111,57 @@ func (d *Dialog) SetProgress(percent int, info string) {
 
 func (d *Dialog) HandleKey(event *tcell.EventKey) (bool, Result) {
 	cancel := Result{Button: -1, Cancelled: true}
+	if d.mode == inputMode && d.Combo {
+		if d.ComboOpen {
+			switch event.Key() {
+			case tcell.KeyEscape:
+				d.ComboOpen = false
+				return false, Result{}
+			case tcell.KeyUp:
+				d.ComboSelected = max(0, d.ComboSelected-1)
+				return false, Result{}
+			case tcell.KeyDown:
+				d.ComboSelected = min(max(0, len(d.ComboItems)-1), d.ComboSelected+1)
+				return false, Result{}
+			case tcell.KeyEnter:
+				if len(d.ComboItems) > 0 {
+					d.Input.SetText(d.ComboItems[d.ComboSelected])
+					return true, Result{Button: 0, Text: d.Input.Text()}
+				}
+				d.ComboOpen = false
+				return false, Result{}
+			case tcell.KeyCtrlD:
+				if len(d.ComboItems) > 0 && d.Input.history != nil {
+					_, _ = d.Input.history.Forget(d.ComboItems[d.ComboSelected])
+					d.ComboItems = d.Input.history.Entries()
+					d.filterComboItems()
+					d.ComboSelected = min(d.ComboSelected, max(0, len(d.ComboItems)-1))
+				}
+				return false, Result{}
+			}
+		} else if event.Key() == tcell.KeyDown {
+			d.filterComboItems()
+			d.ComboSelected = 0
+			d.ComboOpen = len(d.ComboItems) > 0
+			return false, Result{}
+		}
+	}
+	if d.mode == pickerMode && d.Filter {
+		switch event.Key() {
+		case tcell.KeyBackspace, tcell.KeyBackspace2:
+			if len(d.FilterText) > 0 {
+				d.FilterText = string([]rune(d.FilterText)[:len([]rune(d.FilterText))-1])
+				d.Selected = 0
+			}
+			return false, Result{}
+		case tcell.KeyRune:
+			if event.Modifiers() == tcell.ModNone && event.Rune() >= ' ' {
+				d.FilterText += string(event.Rune())
+				d.Selected = 0
+				return false, Result{}
+			}
+		}
+	}
 	switch event.Key() {
 	case tcell.KeyEscape:
 		if d.mode == progressMode {
@@ -150,12 +210,16 @@ func (d *Dialog) HandleKey(event *tcell.EventKey) (bool, Result) {
 			return false, Result{}
 		}
 		if d.mode == pickerMode {
-			d.Selected = min(max(0, len(d.Items)-1), d.Selected+1)
+			d.Selected = min(max(0, len(d.visibleItems())-1), d.Selected+1)
 			return false, Result{}
 		}
 	}
 
 	if d.mode == inputMode && d.Focused == -1 && d.Input.HandleKey(event) {
+		if d.Combo {
+			d.filterComboItems()
+			d.ComboSelected = 0
+		}
 		return false, Result{}
 	}
 	switch event.Key() {
@@ -167,10 +231,11 @@ func (d *Dialog) HandleKey(event *tcell.EventKey) (bool, Result) {
 			return true, Result{Button: d.Focused, Text: d.Input.Text(), Cancelled: true}
 		}
 		if d.mode == pickerMode {
-			if len(d.Items) == 0 {
+			items := d.visibleItems()
+			if len(items) == 0 {
 				return true, Result{Button: 1, Cancelled: true}
 			}
-			return true, Result{Button: 0, Selected: d.Selected, Text: d.Items[d.Selected]}
+			return true, Result{Button: 0, Selected: d.visibleItemIndices()[d.Selected], Text: items[d.Selected]}
 		}
 		return true, Result{Button: d.Focused}
 	case tcell.KeyRune:
@@ -185,18 +250,46 @@ func (d *Dialog) HandleKey(event *tcell.EventKey) (bool, Result) {
 			}
 			return false, Result{}
 		}
-		if d.mode == pickerMode && d.Filter && len(d.Items) > 0 {
-			needle := strings.ToLower(string(event.Rune()))
-			for index := range d.Items {
-				if strings.HasPrefix(strings.ToLower(d.Items[index]), needle) {
-					d.Selected = index
-					break
-				}
-			}
-			return false, Result{}
-		}
 	}
 	return false, Result{}
+}
+
+func (d *Dialog) visibleItems() []string {
+	var items []string
+	for _, index := range d.visibleItemIndices() {
+		items = append(items, d.Items[index])
+	}
+	return items
+}
+
+func (d *Dialog) visibleItemIndices() []int {
+	var indices []int
+	needle := strings.ToLower(d.FilterText)
+	for index, item := range d.Items {
+		if !d.Filter || needle == "" || strings.Contains(strings.ToLower(item), needle) {
+			indices = append(indices, index)
+		}
+	}
+	return indices
+}
+
+func (d *Dialog) filterComboItems() {
+	if d.Input == nil || d.Input.history == nil {
+		d.ComboItems = nil
+		return
+	}
+	needle := strings.ToLower(d.Input.Text())
+	d.ComboItems = d.Input.history.Entries()
+	if needle == "" {
+		return
+	}
+	filtered := d.ComboItems[:0]
+	for _, item := range d.ComboItems {
+		if strings.Contains(strings.ToLower(item), needle) {
+			filtered = append(filtered, item)
+		}
+	}
+	d.ComboItems = filtered
 }
 
 func (d *Dialog) Draw(screen tcell.Screen, theme ui.Theme) {
@@ -205,12 +298,13 @@ func (d *Dialog) Draw(screen tcell.Screen, theme ui.Theme) {
 	for _, line := range d.Lines {
 		lines = append(lines, Wrap(line, max(1, screenWidth-8))...)
 	}
+	items := d.visibleItems()
 	if d.mode == pickerMode {
-		lines = append([]string(nil), d.Items...)
+		lines = append([]string(nil), items...)
 	}
 	footer := ""
 	if d.mode == listMode && len(lines) > 0 {
-		bodyRows := max(1, min(len(lines), screenHeight-8))
+		bodyRows := max(1, min(len(lines), screenHeight-7))
 		d.Offset = min(d.Offset, max(0, len(lines)-bodyRows))
 		footer = fmt.Sprintf("%d-%d of %d", d.Offset+1, min(d.Offset+bodyRows, len(lines)), len(lines))
 		lines = lines[d.Offset:min(d.Offset+bodyRows, len(lines))]
@@ -236,6 +330,15 @@ func (d *Dialog) Draw(screen tcell.Screen, theme ui.Theme) {
 	height := min(screenHeight, max(7, len(lines)+6))
 	if d.mode == inputMode {
 		height = 8
+		if d.ComboOpen {
+			height = min(screenHeight, 8+min(8, len(d.ComboItems)))
+		}
+	}
+	if d.mode == listMode {
+		height = min(screenHeight, max(8, len(lines)+7))
+		if footer != "" {
+			height = min(screenHeight, len(lines)+7)
+		}
 	}
 	x, y := (screenWidth-width)/2, (screenHeight-height)/2
 	rect := ui.Rect{X: x, Y: y, W: width, H: height}
@@ -251,37 +354,53 @@ func (d *Dialog) Draw(screen tcell.Screen, theme ui.Theme) {
 	bodyWidth := max(0, width-4)
 	for index, line := range lines {
 		bodyY := bodyStart + index
-		if bodyY >= y+height-3 {
+		bodyBottom := y + height - 3
+		if d.mode == listMode {
+			bodyBottom = y + height - 5
+		}
+		if bodyY >= bodyBottom {
 			break
 		}
 		ui.Text(screen, x+2, bodyY, bodyWidth, ui.Truncate(line, bodyWidth), theme.Dialog)
 	}
 	if d.mode == inputMode && y+height-4 > bodyStart {
-		ui.Text(screen, x+2, y+height-4, min(bodyWidth, displayWidth(d.Prompt)), d.Prompt, theme.Dialog)
-		d.Input.Draw(screen, x+2+displayWidth(d.Prompt), y+height-4, max(0, bodyWidth-displayWidth(d.Prompt)), theme.Dialog)
+		ui.Text(screen, x+2, y+4, min(bodyWidth, displayWidth(d.Prompt)), d.Prompt, theme.Dialog)
+		d.Input.Draw(screen, x+2+displayWidth(d.Prompt), y+4, max(0, bodyWidth-displayWidth(d.Prompt)), theme.Dialog)
+	}
+	if d.mode == inputMode && d.ComboOpen {
+		startY := y + 5
+		rows := min(8, min(len(d.ComboItems), y+height-3-startY))
+		for index := 0; index < rows; index++ {
+			style := theme.Dialog
+			if index == d.ComboSelected {
+				style = theme.Selection
+			}
+			ui.TextPadded(screen, x+2, startY+index, bodyWidth, ui.Truncate(d.ComboItems[index], bodyWidth), style)
+		}
 	}
 	if d.mode == progressMode {
 		drawProgress(screen, x+2, bodyStart, bodyWidth, d.Progress, theme)
 		if d.ProgressInfo != "" {
 			ui.Text(screen, x+2, bodyStart+1, bodyWidth, ui.Truncate(d.ProgressInfo, bodyWidth), theme.Dialog)
 		}
-		if d.mode == pickerMode {
-			for index, item := range d.Items {
-				row := bodyStart + index
-				if row >= y+height-3 {
-					break
-				}
-				style := theme.Dialog
-				if index == d.Selected {
-					style = theme.Selection
-				}
-				ui.TextPadded(screen, x+2, row, bodyWidth, ui.Truncate(item, bodyWidth), style)
+	}
+	if d.mode == pickerMode {
+		for index, item := range items {
+			row := bodyStart + index
+			if row >= y+height-3 {
+				break
 			}
+			style := theme.Dialog
+			if index == d.Selected {
+				style = theme.Selection
+			}
+			ui.TextPadded(screen, x+2, row, bodyWidth, ui.Truncate(item, bodyWidth), style)
 		}
 	}
 	if footer != "" {
-		ui.TextRight(screen, x+2, y+height-2, bodyWidth, footer, theme.HintLabel)
+		ui.TextRight(screen, x+2, y+height-3, bodyWidth, footer, theme.HintLabel)
 	}
+
 	if len(d.Buttons) > 0 {
 		buttons := make([]string, len(d.Buttons))
 		for index, button := range d.Buttons {
