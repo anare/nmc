@@ -244,19 +244,43 @@ func (a *App) Draw() {
 
 func (a *App) drawHints(height int) {
 	width, _ := a.screen.Size()
-	var hints [10]string
+	hints := a.actionHints(a.currentMode())
 	if a.shellVisible {
+		hints = [10]string{}
 		hints[9] = "Panels"
-	} else if a.findState != nil {
-		hints[2], hints[4], hints[6], hints[9] = "Open", "Panelise", "Find again", "Quit"
-	} else if a.editor != nil {
-		hints[1], hints[3], hints[4], hints[7] = "Save", "Delete line", "Search", "Quit"
-	} else if a.viewer != nil {
-		hints[1], hints[2], hints[3], hints[4], hints[6], hints[7] = "Wrap", "Quit", "Hex", "Copy", "Search", "Raw"
-	} else {
-		hints[2], hints[3], hints[4], hints[5], hints[6], hints[7], hints[9] = "View", "Copy", "Move", "Mkdir", "Delete", "Refresh", "Quit"
 	}
 	ui.DrawHintBar(a.screen, height-1, width, a.theme, hints)
+}
+
+func (a *App) currentMode() keymap.Mode {
+	switch {
+	case a.findState != nil:
+		return keymap.Find
+	case a.editor != nil:
+		return keymap.Editor
+	case a.viewer != nil:
+		return keymap.Viewer
+	default:
+		return keymap.Panel
+	}
+}
+
+func (a *App) actionHints(mode keymap.Mode) [10]string {
+	var hints [10]string
+	for _, action := range keymap.Defaults {
+		if action.Mode != mode {
+			continue
+		}
+		for _, spelling := range a.keys.Bindings(mode, action.Name) {
+			binding, err := keymap.Parse(spelling)
+			if err != nil || binding.Mod != tcell.ModNone || binding.Key < tcell.KeyF1 || binding.Key > tcell.KeyF10 {
+				continue
+			}
+			index := int(binding.Key - tcell.KeyF1)
+			hints[index] = action.Describe
+		}
+	}
+	return hints
 }
 
 func (a *App) drawShell(width, height int) {

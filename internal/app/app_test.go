@@ -121,6 +121,27 @@ func TestPanelCommandsFollowReboundKeymap(t *testing.T) {
 	}
 }
 
+func TestFunctionKeyHintsFollowCurrentBindings(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.actionHints(keymap.Panel)[4]; got != "Copy" {
+		t.Fatalf("default F5 hint = %q, want Copy", got)
+	}
+	binding, err := keymap.Parse("Alt-C")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.keys.Rebind(keymap.Panel, "copy", binding); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.actionHints(keymap.Panel)[4]; got != "" {
+		t.Fatalf("F5 hint remains after rebinding copy: %q", got)
+	}
+}
+
 func TestF2SettingsPersistHiddenFilePreference(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
