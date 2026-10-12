@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/anare/nmc/internal/editor"
+	"github.com/anare/nmc/internal/keymap"
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/anare/nmc/internal/viewer"
 	"github.com/gdamore/tcell/v2"
@@ -92,6 +93,30 @@ func TestHandleKeyMarkRefreshAndQuit(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyF10, 0, tcell.ModNone))
 	if !a.quit {
 		t.Fatal("F10 did not request quit")
+	}
+}
+
+func TestPanelCommandsFollowReboundKeymap(t *testing.T) {
+	screen := newTestScreen(t, 80, 24)
+	fs := vfs.NewMemFS("test")
+	a, err := New(screen, fs, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := keymap.Parse("q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.keys.Rebind(keymap.Panel, "quit", binding); err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF10, 0, tcell.ModNone))
+	if a.quit {
+		t.Fatal("F10 still quit after the quit action was rebound")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone))
+	if !a.quit {
+		t.Fatal("rebound q did not invoke quit")
 	}
 }
 

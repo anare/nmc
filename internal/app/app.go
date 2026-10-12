@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/anare/nmc/internal/find"
 	"github.com/anare/nmc/internal/git"
 	"github.com/anare/nmc/internal/history"
+	"github.com/anare/nmc/internal/keymap"
 	"github.com/anare/nmc/internal/panel"
 	"github.com/anare/nmc/internal/shell"
 	"github.com/anare/nmc/internal/ui"
@@ -45,6 +47,7 @@ type App struct {
 	editor       *editor.Editor
 	history      *history.Store
 	cmdHistory   *history.Cursor
+	keys         *keymap.Map
 	job          *shell.Job
 	commandCtx   context.CancelFunc
 	session      *shell.Session
@@ -70,6 +73,10 @@ func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
 	a := &App{
 		screen: screen, panels: [2]*panel.Panel{left, right}, theme: ui.DefaultTheme(),
 		cmd: dialog.NewTextInput(""), output: shell.NewBuffer(1 << 20), clipboard: clipboard.New(),
+		keys: keymap.New(),
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		a.keys, _ = keymap.Load(filepath.Join(home, ".bcrc"))
 	}
 	if store, err := history.OpenFromEnvironment(); err == nil {
 		a.history = store
@@ -415,17 +422,15 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		}
 		return
 	}
-	if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModAlt != 0 && event.Rune() == 'o' {
-		a.dialog = dialog.NewList("Command output", a.output.Lines())
-		return
-	}
 	if a.commandLineOwns(event) {
 		a.cmd.HandleKey(event)
 		return
 	}
+	if action, ok := a.keys.Lookup(keymap.Panel, event); ok {
+		a.dispatchPanelAction(action)
+		return
+	}
 	switch event.Key() {
-	case tcell.KeyCtrlO:
-		a.toggleShell()
 	case tcell.KeyCtrlX:
 		a.ctrlXPending = true
 		a.status = "Ctrl-X: s symbolic link, l hard link, e edit link"
@@ -458,55 +463,58 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		} else {
 			a.status = ""
 		}
-	case tcell.KeyCtrlT, tcell.KeyInsert:
-		active.ToggleMark()
-	case tcell.KeyCtrlR:
-		if err := active.Reload(context.Background()); err != nil {
-			a.status = err.Error()
-		} else {
-			a.status = "Directory refreshed"
+	case tcell.KeyRune:
+		if event.Modifiers() == tcell.ModNone && event.Rune() >= ' ' {
+			a.cmd.HandleKey(event)
 		}
-	case tcell.KeyF10, tcell.KeyCtrlQ:
-		a.quit = true
-	case tcell.KeyF5:
-		a.promptOperation("Copy")
-	case tcell.KeyF6:
-		a.promptOperation("Move")
-	case tcell.KeyF7:
-		a.promptMkdir()
-	case tcell.KeyF8:
-		a.confirmDelete()
-	case tcell.KeyF3:
+	}
+}
+
+func (a *App) dispatchPanelAction(action string) {
+	active := a.panels[a.active]
+	switch action {
+	case "view":
 		if entry, ok := active.Selected(); ok && entry.IsUp {
 			a.openGitHistory()
 		} else {
 			a.openViewer()
 		}
-	case tcell.KeyF4:
+	case "edit":
 		a.openEditor()
-	case tcell.KeyF18:
+	case "copy":
+		a.promptOperation("Copy")
+	case "move":
+		a.promptOperation("Move")
+	case "rename":
 		a.rename()
-	case tcell.KeyF16:
-		a.editLink()
-	case tcell.KeyF17:
+	case "create-link":
 		a.promptLink(false)
-	case tcell.KeyRune:
-		if event.Modifiers()&tcell.ModAlt != 0 {
-			switch event.Rune() {
-			case 'r':
-				a.rename()
-			case 'l':
-				a.promptLink(false)
-			case 'e':
-				a.editLink()
-			case 'g':
-				a.openGitHistory()
-			case 'f':
-				a.promptFind()
-			}
-		} else if event.Modifiers() == tcell.ModNone && event.Rune() >= ' ' {
-			a.cmd.HandleKey(event)
+	case "edit-link":
+		a.editLink()
+	case "mkdir":
+		a.promptMkdir()
+	case "delete":
+		a.confirmDelete()
+	case "quit":
+		a.quit = true
+	case "mark":
+		active.ToggleMark()
+	case "refresh":
+		if err := active.Reload(context.Background()); err != nil {
+			a.status = err.Error()
+		} else {
+			a.status = "Directory refreshed"
 		}
+	case "open-shell":
+		a.toggleShell()
+	case "output-log":
+		a.dialog = dialog.NewList("Command output", a.output.Lines())
+	case "find-files":
+		a.promptFind()
+	case "git-history":
+		a.openGitHistory()
+	default:
+		a.status = "Action is not available yet: " + action
 	}
 }
 
