@@ -125,16 +125,18 @@ func (p *Panel) footer(theme ui.Theme) (string, tcell.Style) {
 	if p.Err != nil {
 		return p.Err.Error(), theme.BrokenLink
 	}
-	if count := len(p.Marked); count > 0 {
-		var bytes int64
-		for _, entry := range p.Entries {
-			if entry.IsUp {
-				continue
-			}
-			if p.Marked[p.FS.Join(p.Cwd, entry.Name)] {
-				bytes += entry.Size
-			}
+	count := 0
+	var bytes int64
+	for _, entry := range p.Entries {
+		if entry.IsUp {
+			continue
 		}
+		if p.Marked[p.FS.Join(p.Cwd, entry.Name)] {
+			count++
+			bytes += entry.Size
+		}
+	}
+	if count > 0 {
 		noun := "files"
 		if count == 1 {
 			noun = "file"

@@ -171,7 +171,12 @@ func TestDisplayNameKeepsTheIndicatorWhenTruncated(t *testing.T) {
 
 func TestPanelFooterShowsSymlinkAndHardLinkDetails(t *testing.T) {
 	theme := ui.DefaultTheme()
-	p := &Panel{Entries: []vfs.Entry{{Name: "config", IsLink: true, Target: "/etc/app.conf"}}}
+	p := &Panel{
+		FS:      vfs.NewMemFS("test"),
+		Cwd:     "/",
+		Entries: []vfs.Entry{{Name: "config", IsLink: true, Target: "/etc/app.conf"}},
+		Marked:  make(map[string]bool),
+	}
 	p.MoveTo(0)
 	if got, _ := p.footer(theme); got != "config -> /etc/app.conf" {
 		t.Fatalf("symlink footer = %q", got)
@@ -180,9 +185,56 @@ func TestPanelFooterShowsSymlinkAndHardLinkDetails(t *testing.T) {
 	if got, _ := p.footer(theme); got != "data.db   3 links" {
 		t.Fatalf("hard-link footer = %q", got)
 	}
+	p.Entries[0] = vfs.Entry{Name: "broken", IsLink: true, Broken: true}
+	p.Err = nil
+	if got, _ := p.footer(theme); got != "broken -> (broken)" {
+		t.Fatalf("broken-link footer = %q", got)
+	}
 	p.Err = fmt.Errorf("listing failed")
 	if got, _ := p.footer(theme); got != "listing failed" {
 		t.Fatalf("error footer = %q", got)
+	}
+}
+
+func TestPanelFooterCountsOnlyMarkedEntriesInTheListing(t *testing.T) {
+	fs := vfs.NewMemFS("test")
+	fs.PutFile("/a", make([]byte, 512), 0o644)
+	fs.PutFile("/b", make([]byte, 1024), 0o644)
+	p, err := New(fs, "/", vfs.Options{ShowHidden: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Marked["/a"] = true
+	p.Marked["/b"] = true
+	p.Marked["/stale"] = true
+	if got, _ := p.footer(ui.DefaultTheme()); got != "2 files marked, 1.5K bytes" {
+		t.Fatalf("marked footer = %q", got)
+	}
+}
+
+func TestNarrowPanelDropsTheTimeThenSizeColumn(t *testing.T) {
+	fs := vfs.NewMemFS("test")
+	fs.Put("/", []vfs.Entry{{Name: "entry.txt"}})
+	p, err := New(fs, "/", vfs.Options{ShowHidden: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	theme := ui.DefaultTheme()
+	for _, test := range []struct {
+		width       int
+		hasSize     bool
+		hasModified bool
+	}{
+		{width: 30, hasSize: true},
+		{width: 20, hasSize: false},
+	} {
+		p.SetRect(0, 0, test.width, 10)
+		screen := newPanelScreen(t, test.width, 10)
+		p.Draw(screen, theme)
+		header := panelScreenRow(screen, 1)
+		if strings.Contains(header, "Modify time") != test.hasModified || strings.Contains(header, "Size") != test.hasSize {
+			t.Fatalf("width %d column heading = %q", test.width, header)
+		}
 	}
 }
 
