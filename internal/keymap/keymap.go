@@ -294,6 +294,24 @@ func (m *Map) Settings() map[string]string {
 	return result
 }
 
+func (m *Map) SetSetting(key, value string) {
+	if m.settings == nil {
+		m.settings = make(map[string]string)
+	}
+	m.settings[key] = value
+}
+
+func (m *Map) Bindings(mode Mode, action string) []string {
+	var result []string
+	for binding, boundAction := range m.bindings[mode] {
+		if boundAction == action {
+			result = append(result, binding.String())
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
 func Load(path string) (*Map, []string) {
 	m := New()
 	file, err := os.Open(path)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -117,6 +118,73 @@ func TestPanelCommandsFollowReboundKeymap(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone))
 	if !a.quit {
 		t.Fatal("rebound q did not invoke quit")
+	}
+}
+
+func TestF2SettingsPersistHiddenFilePreference(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fs := vfs.NewMemFS("test")
+	fs.Put("/", []vfs.Entry{{Name: ".hidden"}, {Name: "visible"}})
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, fs, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF2, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.panels[0].Opt.ShowHidden {
+		t.Fatal("settings menu did not turn hidden files off")
+	}
+	for range 5 {
+		a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.status != "Settings saved" {
+		t.Fatalf("save status = %q", a.status)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".bcrc")); err != nil {
+		t.Fatalf("settings file was not written: %v", err)
+	}
+	restarted, err := New(newTestScreen(t, 80, 24), fs, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.panels[0].Opt.ShowHidden {
+		t.Fatal("hidden-file preference did not survive restart")
+	}
+	for _, entry := range restarted.panels[0].Entries {
+		if entry.Name == ".hidden" {
+			t.Fatal("hidden file remained visible after restart")
+		}
+	}
+}
+
+func TestF2KeyTesterCapturesKeysAndRequiresTwoEscapes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF2, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if !a.keyTest {
+		t.Fatal("settings menu did not open the key tester")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlZ, 0, tcell.ModCtrl))
+	if !strings.Contains(a.keyTestText, "Key=") {
+		t.Fatalf("key tester did not report the key: %q", a.keyTestText)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	if !a.keyTest {
+		t.Fatal("one Escape left the key tester")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	if a.keyTest {
+		t.Fatal("two Escapes did not leave the key tester")
 	}
 }
 

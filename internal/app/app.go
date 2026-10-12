@@ -48,6 +48,11 @@ type App struct {
 	history      *history.Store
 	cmdHistory   *history.Cursor
 	keys         *keymap.Map
+	configPath   string
+	lineNumbers  bool
+	keyTest      bool
+	keyTestEsc   bool
+	keyTestText  string
 	job          *shell.Job
 	commandCtx   context.CancelFunc
 	session      *shell.Session
@@ -61,7 +66,17 @@ func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
 	if screen == nil || fs == nil {
 		return nil, os.ErrInvalid
 	}
-	options := vfs.Options{ShowHidden: true}
+	keys := keymap.New()
+	configPath := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		configPath = filepath.Join(home, ".bcrc")
+		keys, _ = keymap.Load(configPath)
+	}
+	settings := keys.Settings()
+	options := vfs.Options{ShowHidden: !strings.EqualFold(settings["hidden-files"], "off")}
+	if sortMode, ok := vfs.ParseSortMode(settings["sort-order"]); ok {
+		options.SortMode = sortMode
+	}
 	left, err := panel.New(fs, cwd, options)
 	if err != nil {
 		return nil, err
@@ -73,10 +88,8 @@ func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
 	a := &App{
 		screen: screen, panels: [2]*panel.Panel{left, right}, theme: ui.DefaultTheme(),
 		cmd: dialog.NewTextInput(""), output: shell.NewBuffer(1 << 20), clipboard: clipboard.New(),
-		keys: keymap.New(),
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		a.keys, _ = keymap.Load(filepath.Join(home, ".bcrc"))
+		keys: keys, configPath: configPath,
+		lineNumbers: strings.EqualFold(settings["line-numbers"], "on"),
 	}
 	if store, err := history.OpenFromEnvironment(); err == nil {
 		a.history = store
@@ -159,6 +172,11 @@ func (a *App) Draw() {
 	}
 	if a.shellVisible && a.session != nil {
 		a.drawShell(width, height)
+		a.screen.Show()
+		return
+	}
+	if a.keyTest {
+		a.drawKeyTester(width, height)
 		a.screen.Show()
 		return
 	}
@@ -345,6 +363,10 @@ func (a *App) handleShellKey(event *tcell.EventKey) {
 }
 
 func (a *App) HandleKey(event *tcell.EventKey) {
+	if a.keyTest {
+		a.handleKeyTester(event)
+		return
+	}
 	if a.dialog != nil {
 		done, result := a.dialog.HandleKey(event)
 		if done {
@@ -525,9 +547,165 @@ func (a *App) dispatchPanelAction(action string) {
 		a.promptFind()
 	case "git-history":
 		a.openGitHistory()
+	case "menu":
+		a.openSettings()
+	case "help":
+		a.showShortcuts()
+	case "toggle-hidden":
+		a.toggleHidden()
+	case "sort-order":
+		a.cycleSortOrder()
+	case "sync-other-panel":
+		other := a.panels[1-a.active]
+		if err := other.SetDir(context.Background(), active.Cwd, ""); err != nil {
+			a.status = err.Error()
+		}
 	default:
 		a.status = "Action is not available yet: " + action
 	}
+}
+
+func (a *App) openSettings() {
+	hidden := "on"
+	if !a.panels[0].Opt.ShowHidden {
+		hidden = "off"
+	}
+	lineNumbers := "off"
+	if a.lineNumbers {
+		lineNumbers = "on"
+	}
+	items := []string{
+		"Show shortcuts",
+		"Key tester",
+		"Show hidden files: " + hidden,
+		"Sort order: " + sortLabel(a.panels[0].Opt.SortMode),
+		"Line numbers: " + lineNumbers,
+		"Save all settings",
+	}
+	a.dialog = dialog.NewMenu("Settings", items, func(result dialog.Result) {
+		if !result.OK() {
+			return
+		}
+		switch result.Selected {
+		case 0:
+			a.showShortcuts()
+		case 1:
+			a.keyTest = true
+			a.keyTestText = "Press a key to see how the app receives it. Esc twice returns."
+		case 2:
+			a.toggleHidden()
+			a.openSettings()
+		case 3:
+			a.cycleSortOrder()
+			a.openSettings()
+		case 4:
+			a.lineNumbers = !a.lineNumbers
+			value := "off"
+			if a.lineNumbers {
+				value = "on"
+			}
+			a.keys.SetSetting("line-numbers", value)
+			if a.viewer != nil {
+				a.viewer.LineNumber = a.lineNumbers
+			}
+			if a.editor != nil {
+				a.editor.LineNumber = a.lineNumbers
+			}
+			a.openSettings()
+		case 5:
+			if a.configPath == "" {
+				a.status = "Cannot determine the settings file path"
+				return
+			}
+			if err := a.keys.Save(a.configPath); err != nil {
+				a.dialog = dialog.NewMessage("Save settings", []string{err.Error()}, true)
+			} else {
+				a.status = "Settings saved"
+			}
+		}
+	})
+}
+
+func sortLabel(mode vfs.SortMode) string {
+	switch mode {
+	case vfs.SortByExt:
+		return "Extension"
+	case vfs.SortBySize:
+		return "Size"
+	case vfs.SortByTime:
+		return "Time"
+	default:
+		return "Name"
+	}
+}
+
+func (a *App) toggleHidden() {
+	show := !a.panels[0].Opt.ShowHidden
+	value := "off"
+	if show {
+		value = "on"
+	}
+	a.keys.SetSetting("hidden-files", value)
+	for _, panel := range a.panels {
+		panel.Opt.ShowHidden = show
+		if err := panel.Reload(context.Background()); err != nil {
+			a.status = err.Error()
+		}
+	}
+}
+
+func (a *App) cycleSortOrder() {
+	next := (a.panels[0].Opt.SortMode + 1) % 4
+	a.keys.SetSetting("sort-order", sortLabel(next))
+	for _, panel := range a.panels {
+		panel.Opt.SortMode = next
+		if err := panel.Reload(context.Background()); err != nil {
+			a.status = err.Error()
+		}
+	}
+}
+
+func (a *App) showShortcuts() {
+	var lines []string
+	for _, mode := range []keymap.Mode{keymap.Panel, keymap.Viewer, keymap.Editor, keymap.Find} {
+		lines = append(lines, "["+string(mode)+"]")
+		for _, action := range keymap.Defaults {
+			if action.Mode != mode {
+				continue
+			}
+			bindings := a.keys.Bindings(mode, action.Name)
+			lines = append(lines, fmt.Sprintf("%-22s %s", action.Describe, strings.Join(bindings, ", ")))
+		}
+	}
+	a.dialog = dialog.NewList("Shortcuts", lines)
+}
+
+func (a *App) handleKeyTester(event *tcell.EventKey) {
+	if event.Key() == tcell.KeyEscape {
+		if a.keyTestEsc {
+			a.keyTest = false
+			a.keyTestEsc = false
+			return
+		}
+		a.keyTestEsc = true
+		a.keyTestText = "Esc — press Esc again to return"
+		return
+	}
+	a.keyTestEsc = false
+	action := "unbound"
+	for _, mode := range []keymap.Mode{keymap.Panel, keymap.Viewer, keymap.Editor, keymap.Find} {
+		if name, ok := a.keys.Lookup(mode, event); ok {
+			action = string(mode) + ": " + name
+			break
+		}
+	}
+	a.keyTestText = fmt.Sprintf("%s  Key=%d Mod=%d Rune=%q", action, event.Key(), event.Modifiers(), event.Rune())
+}
+
+func (a *App) drawKeyTester(width, height int) {
+	ui.TextCenter(a.screen, 0, 1, width, "Key tester — press any key", a.theme.Border)
+	ui.TextCenter(a.screen, 0, height/2, width, a.keyTestText, a.theme.Selection)
+	ui.TextCenter(a.screen, 0, height-2, width, "Esc Esc to leave", a.theme.HintLabel)
 }
 
 func (a *App) commandLineOwns(event *tcell.EventKey) bool {
@@ -882,6 +1060,7 @@ func (a *App) openViewer() {
 		a.dialog = dialog.NewMessage("View", []string{err.Error()}, true)
 		return
 	}
+	view.LineNumber = a.lineNumbers
 	a.viewer = view
 }
 
@@ -908,6 +1087,7 @@ func (a *App) openEditor() {
 				a.dialog = dialog.NewMessage("Edit", []string{err.Error()}, true)
 				return
 			}
+			opened.LineNumber = a.lineNumbers
 			a.editor = opened
 		})
 		return
@@ -916,6 +1096,7 @@ func (a *App) openEditor() {
 		a.dialog = dialog.NewMessage("Edit", []string{err.Error()}, true)
 		return
 	}
+	opened.LineNumber = a.lineNumbers
 	a.editor = opened
 }
 
