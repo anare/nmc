@@ -79,6 +79,7 @@ func TestEnsureConfigWritesOnlyWhenMissing(t *testing.T) {
 func TestHandlerPathsArePassedThroughEnvironment(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "should-not-exist")
 	hostile := "path '$(touch " + marker + ")"
+	t.Setenv("FILE", "inherited value must not win")
 	output, err := Run(context.Background(), `printf '%s' "$FILE"`, map[string]string{"FILE": hostile})
 	if err != nil || string(output) != hostile {
 		t.Fatalf("handler output=%q err=%v", output, err)
@@ -88,6 +89,17 @@ func TestHandlerPathsArePassedThroughEnvironment(t *testing.T) {
 	}
 	if _, err := Run(context.Background(), "true", map[string]string{"UNSAFE": "value"}); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unsupported environment variable error = %v", err)
+	}
+}
+
+func TestStartUsesTheProvidedEnvironmentValue(t *testing.T) {
+	t.Setenv("FILE", "inherited")
+	cmd, err := Start(context.Background(), `test "$FILE" = "provided"`, map[string]string{"FILE": "provided"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("handler did not receive the provided environment value: %v", err)
 	}
 }
 

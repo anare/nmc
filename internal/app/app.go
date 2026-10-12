@@ -4,18 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/anare/nmc/internal/archivefs"
 	"github.com/anare/nmc/internal/clipboard"
 	"github.com/anare/nmc/internal/dialog"
 	"github.com/anare/nmc/internal/editor"
 	"github.com/anare/nmc/internal/fileop"
 	"github.com/anare/nmc/internal/find"
 	"github.com/anare/nmc/internal/git"
+	"github.com/anare/nmc/internal/handlers"
 	"github.com/anare/nmc/internal/history"
 	"github.com/anare/nmc/internal/keymap"
 	"github.com/anare/nmc/internal/panel"
@@ -33,38 +37,43 @@ const (
 )
 
 type App struct {
-	screen       tcell.Screen
-	panels       [2]*panel.Panel
-	active       int
-	theme        ui.Theme
-	status       string
-	quit         bool
-	ctrlXPending bool
-	dialog       *dialog.Dialog
-	cmd          *dialog.TextInput
-	output       *shell.Buffer
-	opCancel     context.CancelFunc
-	viewer       *viewer.Viewer
-	editor       *editor.Editor
-	history      *history.Store
-	cmdHistory   *history.Cursor
-	keys         *keymap.Map
-	configPath   string
-	lineNumbers  bool
-	keyTest      bool
-	keyTestEsc   bool
-	keyTestText  string
-	keyCapture   *bindingCapture
-	job          *shell.Job
-	commandCtx   context.CancelFunc
-	session      *shell.Session
-	sessionCtx   context.CancelFunc
-	shellVisible bool
-	findState    *findState
-	clipboard    *clipboard.Clipboard
-	hostHistory  *history.Cursor
-	remoteFS     []*sshfs.FS
-	dialRemote   func(context.Context, string, string, int) (*sshfs.FS, string, error)
+	screen                      tcell.Screen
+	panels                      [2]*panel.Panel
+	active                      int
+	theme                       ui.Theme
+	status                      string
+	quit                        bool
+	ctrlXPending                bool
+	dialog                      *dialog.Dialog
+	cmd                         *dialog.TextInput
+	output                      *shell.Buffer
+	opCancel                    context.CancelFunc
+	viewer                      *viewer.Viewer
+	editor                      *editor.Editor
+	history                     *history.Store
+	cmdHistory                  *history.Cursor
+	keys                        *keymap.Map
+	configPath                  string
+	handlerPath                 string
+	handlerSet                  *handlers.Set
+	handlerProblems             []string
+	reloadHandlersOnEditorClose bool
+	lineNumbers                 bool
+	keyTest                     bool
+	keyTestEsc                  bool
+	keyTestText                 string
+	keyCapture                  *bindingCapture
+	job                         *shell.Job
+	commandCtx                  context.CancelFunc
+	session                     *shell.Session
+	sessionCtx                  context.CancelFunc
+	shellVisible                bool
+	findState                   *findState
+	clipboard                   *clipboard.Clipboard
+	hostHistory                 *history.Cursor
+	remoteFS                    []*sshfs.FS
+	archiveFS                   []*archivefs.FS
+	dialRemote                  func(context.Context, string, string, int) (*sshfs.FS, string, error)
 }
 
 func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
@@ -94,7 +103,12 @@ func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
 		screen: screen, panels: [2]*panel.Panel{left, right}, theme: ui.DefaultTheme(),
 		cmd: dialog.NewTextInput(""), output: shell.NewBuffer(1 << 20), clipboard: clipboard.New(),
 		keys: keys, configPath: configPath,
+		handlerSet:  handlers.DefaultSet(),
 		lineNumbers: strings.EqualFold(settings["line-numbers"], "on"),
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		a.handlerPath = filepath.Join(home, ".bchandlers")
+		a.reloadHandlers()
 	}
 	if store, err := history.OpenFromEnvironment(); err == nil {
 		a.history = store
@@ -127,6 +141,9 @@ func (a *App) Run() error {
 			_ = a.clipboard.Close()
 		}
 		for _, fs := range a.remoteFS {
+			_ = fs.Close()
+		}
+		for _, fs := range a.archiveFS {
 			_ = fs.Close()
 		}
 	}()
@@ -468,9 +485,18 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 	a.status = ""
 	active := a.panels[a.active]
 	if event.Key() == tcell.KeyEnter && a.cmd.Empty() {
-		if entry, ok := active.Selected(); ok && entry.IsUp && active.FS.Name() != "" {
-			a.disconnectRemote()
-			return
+		if entry, ok := active.Selected(); ok {
+			if entry.IsUp {
+				if active.FS.Name() != "" && active.FS.Dir(active.Cwd) == active.Cwd && !active.Nested() {
+					a.disconnectRemote()
+				} else if err := a.goUpPanel(active); err != nil {
+					a.status = err.Error()
+				}
+				return
+			}
+			if a.enterArchive(active, entry) {
+				return
+			}
 		}
 		handled, err := active.Enter(context.Background())
 		if err != nil {
@@ -544,10 +570,10 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		}
 	case tcell.KeyLeft:
 		var err error
-		if active.FS.Name() != "" && active.FS.Dir(active.Cwd) == active.Cwd {
+		if active.FS.Name() != "" && active.FS.Dir(active.Cwd) == active.Cwd && !active.Nested() {
 			a.disconnectRemote()
 		} else {
-			err = active.GoUp(context.Background())
+			err = a.goUpPanel(active)
 		}
 		if err != nil {
 			a.status = err.Error()
@@ -568,7 +594,9 @@ func (a *App) dispatchPanelAction(action string) {
 		if entry, ok := active.Selected(); ok && entry.IsUp {
 			a.openGitHistory()
 		} else {
-			a.openViewer()
+			if !a.openArchiveListing(active) && !a.openWithSelectedHandler(active) {
+				a.openViewer()
+			}
 		}
 	case "edit":
 		a.openEditor()
@@ -607,6 +635,8 @@ func (a *App) dispatchPanelAction(action string) {
 		}
 	case "open-shell":
 		a.toggleShell()
+	case "open-with":
+		a.openWithSelected()
 	case "output-log":
 		a.dialog = dialog.NewList("Command output", a.output.Lines())
 	case "find-files":
@@ -755,6 +785,7 @@ func (a *App) openSettings() {
 	}
 	items := []string{
 		"Shortcuts…",
+		"File handlers…",
 		"Key tester",
 		"Show hidden files: " + hidden,
 		"Sort order: " + sortLabel(a.panels[0].Opt.SortMode),
@@ -769,15 +800,17 @@ func (a *App) openSettings() {
 		case 0:
 			a.openShortcutList()
 		case 1:
+			a.openFileHandlers()
+		case 2:
 			a.keyTest = true
 			a.keyTestText = "Press a key to see how the app receives it. Esc twice returns."
-		case 2:
+		case 3:
 			a.toggleHidden()
 			a.openSettings()
-		case 3:
+		case 4:
 			a.cycleSortOrder()
 			a.openSettings()
-		case 4:
+		case 5:
 			a.lineNumbers = !a.lineNumbers
 			value := "off"
 			if a.lineNumbers {
@@ -791,7 +824,7 @@ func (a *App) openSettings() {
 				a.editor.LineNumber = a.lineNumbers
 			}
 			a.openSettings()
-		case 5:
+		case 6:
 			a.saveSettings()
 		}
 	})
@@ -1307,6 +1340,251 @@ func (a *App) openViewer() {
 	a.viewer = view
 }
 
+func (a *App) reloadHandlers() {
+	if a.handlerPath == "" {
+		a.handlerSet = handlers.DefaultSet()
+		a.handlerProblems = nil
+		return
+	}
+	a.handlerSet, a.handlerProblems = handlers.Load(a.handlerPath)
+}
+
+func (a *App) openFileHandlers() {
+	if a.handlerPath == "" {
+		a.dialog = dialog.NewMessage("File handlers", []string{"Cannot determine the handler configuration path."}, true)
+		return
+	}
+	if err := handlers.EnsureConfig(a.handlerPath); err != nil {
+		a.dialog = dialog.NewMessage("File handlers", []string{err.Error()}, true)
+		return
+	}
+	a.reloadHandlers()
+	items := make([]string, 0)
+	for _, kind := range []handlers.Kind{handlers.Archive, handlers.Open} {
+		for _, handler := range a.handlerSet.All(kind) {
+			program := handler.Run
+			if kind == handlers.Archive {
+				program = handler.List
+			}
+			missing := ""
+			if !handlers.ProgramAvailable(program) || kind == handlers.Archive && !handlers.ProgramAvailable(handler.Extract) {
+				missing = "! "
+			}
+			items = append(items, fmt.Sprintf("%s[%s] %s: %s", missing, handler.Source, handler.Name, strings.Join(handler.Patterns, ", ")))
+		}
+	}
+	if len(a.handlerProblems) > 0 {
+		items = append(items, "! config: "+strings.Join(a.handlerProblems, "; "))
+	}
+	editIndex := len(items)
+	items = append(items, "Edit "+a.handlerPath)
+	a.dialog = dialog.NewMenu("File handlers", items, func(result dialog.Result) {
+		if result.OK() && result.Selected == editIndex {
+			a.editHandlerConfig()
+		}
+	})
+}
+
+func (a *App) editHandlerConfig() {
+	opened, err := editor.Open(context.Background(), vfs.NewLocal(), a.handlerPath)
+	if err != nil {
+		a.dialog = dialog.NewMessage("File handlers", []string{err.Error()}, true)
+		return
+	}
+	opened.LineNumber = a.lineNumbers
+	a.editor = opened
+	a.reloadHandlersOnEditorClose = true
+}
+
+func (a *App) enterArchive(p *panel.Panel, entry vfs.Entry) bool {
+	if entry.IsUp || entry.IsDir || a.handlerSet == nil {
+		return false
+	}
+	handler, ok := a.handlerSet.Archive(entry.Name)
+	if !ok {
+		return false
+	}
+	if p.FS.Name() != "" {
+		a.status = "Archives can only be opened from the local filesystem"
+		return true
+	}
+	archive, err := archivefs.Open(context.Background(), handler, p.CurrentPath())
+	if err != nil {
+		a.dialog = dialog.NewMessage("Open archive", []string{err.Error()}, true)
+		return true
+	}
+	if err := p.EnterFS(archive, "/", entry.Name); err != nil {
+		_ = archive.Close()
+		a.dialog = dialog.NewMessage("Open archive", []string{err.Error()}, true)
+		return true
+	}
+	a.archiveFS = append(a.archiveFS, archive)
+	a.status = "Opened " + entry.Name
+	return true
+}
+
+func (a *App) goUpPanel(p *panel.Panel) error {
+	oldFS := p.FS
+	if err := p.GoUp(context.Background()); err != nil {
+		return err
+	}
+	if oldFS != p.FS {
+		if archive, ok := oldFS.(*archivefs.FS); ok {
+			_ = archive.Close()
+			for index, open := range a.archiveFS {
+				if open == archive {
+					a.archiveFS = append(a.archiveFS[:index], a.archiveFS[index+1:]...)
+					break
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (a *App) openArchiveListing(p *panel.Panel) bool {
+	entry, ok := p.Selected()
+	if !ok || entry.IsUp || entry.IsDir || a.handlerSet == nil {
+		return false
+	}
+	handler, ok := a.handlerSet.Archive(entry.Name)
+	if !ok {
+		return false
+	}
+	if p.FS.Name() != "" {
+		a.status = "Archives can only be opened from the local filesystem"
+		return true
+	}
+	archive, err := archivefs.Open(context.Background(), handler, p.CurrentPath())
+	if err != nil {
+		a.dialog = dialog.NewMessage("List archive", []string{err.Error()}, true)
+		return true
+	}
+	lines, err := archiveListing(context.Background(), archive)
+	_ = archive.Close()
+	if err != nil {
+		a.dialog = dialog.NewMessage("List archive", []string{err.Error()}, true)
+		return true
+	}
+	a.viewer = viewer.FromBytesAs(p.CurrentPath(), "text", []byte(strings.Join(lines, "\n")))
+	return true
+}
+
+func archiveListing(ctx context.Context, fs vfs.FS) ([]string, error) {
+	var lines []string
+	var walk func(string) error
+	walk = func(dir string) error {
+		entries, err := fs.List(ctx, dir)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.IsUp {
+				continue
+			}
+			name := fs.Join(dir, entry.Name)
+			relative := strings.TrimPrefix(name, "/")
+			if entry.IsDir {
+				relative += "/"
+			}
+			lines = append(lines, relative)
+			if entry.IsDir {
+				if err := walk(name); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk("/"); err != nil {
+		return nil, err
+	}
+	sort.Strings(lines)
+	return lines, nil
+}
+
+func (a *App) openWithSelectedHandler(p *panel.Panel) bool {
+	entry, ok := p.Selected()
+	if !ok || entry.IsUp || entry.IsDir || a.handlerSet == nil {
+		return false
+	}
+	handler, ok := a.handlerSet.NamedOpen(entry.Name)
+	if !ok {
+		return false
+	}
+	if !handlers.ProgramAvailable(handler.Run) {
+		a.status = "Open-with program unavailable; showing file"
+		return false
+	}
+	a.startOpenWith(p, entry, handler)
+	return true
+}
+
+func (a *App) openWithSelected() {
+	p := a.panels[a.active]
+	entry, ok := p.Selected()
+	if !ok || entry.IsUp || entry.IsDir || a.handlerSet == nil {
+		a.status = "Open with requires a file"
+		return
+	}
+	handler, ok := a.handlerSet.OpenWith(entry.Name)
+	if !ok {
+		a.status = "No open-with handler for this file"
+		return
+	}
+	if !handlers.ProgramAvailable(handler.Run) {
+		a.dialog = dialog.NewMessage("Open with", []string{"The configured program is not installed."}, true)
+		return
+	}
+	a.startOpenWith(p, entry, handler)
+}
+
+func (a *App) startOpenWith(p *panel.Panel, entry vfs.Entry, handler handlers.Handler) {
+	file := p.CurrentPath()
+	removeFile := ""
+	if p.FS.Name() != "" {
+		temp, err := os.CreateTemp("", "nmc-open-*"+filepath.Ext(entry.Name))
+		if err != nil {
+			a.dialog = dialog.NewMessage("Open with", []string{err.Error()}, true)
+			return
+		}
+		removeFile = temp.Name()
+		reader, openErr := p.FS.Open(context.Background(), file)
+		if openErr == nil {
+			_, openErr = io.Copy(temp, reader)
+			closeErr := reader.Close()
+			if openErr == nil {
+				openErr = closeErr
+			}
+		}
+		closeErr := temp.Close()
+		if openErr == nil {
+			openErr = closeErr
+		}
+		if openErr != nil {
+			_ = os.Remove(removeFile)
+			a.dialog = dialog.NewMessage("Open with", []string{openErr.Error()}, true)
+			return
+		}
+		file = removeFile
+	}
+	cmd, err := handlers.Start(context.Background(), handler.Run, map[string]string{"FILE": file})
+	if err != nil {
+		if removeFile != "" {
+			_ = os.Remove(removeFile)
+		}
+		a.dialog = dialog.NewMessage("Open with", []string{err.Error()}, true)
+		return
+	}
+	go func() {
+		_ = cmd.Wait()
+		if removeFile != "" {
+			_ = os.Remove(removeFile)
+		}
+	}()
+	a.status = "Opened with " + handler.Name
+}
+
 func (a *App) openEditor() {
 	p := a.panels[a.active]
 	entry, ok := p.Selected()
@@ -1429,7 +1707,7 @@ func (a *App) dispatchEditorAction(action string) {
 func (a *App) closeEditor() {
 	e := a.editor
 	if !e.Changed {
-		a.editor = nil
+		a.finishEditor()
 		return
 	}
 	a.dialog = dialog.NewConfirm("Unsaved changes", []string{"Save changes before leaving?"}, []string{"Save", "Discard", "Cancel"}, func(result dialog.Result) {
@@ -1439,11 +1717,19 @@ func (a *App) closeEditor() {
 				a.dialog = dialog.NewMessage("Save", []string{err.Error()}, true)
 				return
 			}
-			a.editor = nil
+			a.finishEditor()
 		case 1:
-			a.editor = nil
+			a.finishEditor()
 		}
 	})
+}
+
+func (a *App) finishEditor() {
+	a.editor = nil
+	if a.reloadHandlersOnEditorClose {
+		a.reloadHandlersOnEditorClose = false
+		a.reloadHandlers()
+	}
 }
 
 func (a *App) openGitHistory() {

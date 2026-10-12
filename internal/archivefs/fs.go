@@ -69,6 +69,9 @@ func parseListing(output []byte) (map[string]vfs.Entry, map[string]bool, error) 
 	entries := map[string]vfs.Entry{"/": {Name: "/", IsDir: true, Mode: os.ModeDir | 0o555}}
 	files := make(map[string]bool)
 	for lineNumber, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
+		if lineNumber >= 100_000 || len(line) > 4096 {
+			return nil, nil, errors.New("archive listing exceeds safety limits")
+		}
 		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
 			continue
@@ -81,7 +84,7 @@ func parseListing(output []byte) (map[string]vfs.Entry, map[string]bool, error) 
 			}
 		}
 		name := line
-		if name == "" || strings.ContainsRune(name, 0) || strings.Contains(name, `\`) || path.IsAbs(name) || filepath.VolumeName(name) != "" {
+		if name == "" || strings.ContainsRune(name, 0) || strings.Contains(name, `\`) || path.IsAbs(name) || filepath.VolumeName(name) != "" || isDrivePath(name) {
 			return nil, nil, fmt.Errorf("unsafe archive path on listing line %d", lineNumber+1)
 		}
 		isDir := strings.HasSuffix(name, "/")
@@ -250,7 +253,7 @@ func (f *FS) extract(ctx context.Context, key string) (string, error) {
 }
 
 func (f *FS) key(name string) (string, error) {
-	if !path.IsAbs(name) || strings.ContainsRune(name, 0) {
+	if !path.IsAbs(name) || strings.ContainsRune(name, 0) || strings.Contains(name, `\`) || isDrivePath(strings.TrimPrefix(name, "/")) {
 		return "", errors.New("archive path must be absolute")
 	}
 	for _, part := range strings.Split(name, "/") {
@@ -263,6 +266,11 @@ func (f *FS) key(name string) (string, error) {
 		return "", errors.New("archive path must be clean")
 	}
 	return clean, nil
+}
+
+func isDrivePath(name string) bool {
+	return len(name) >= 2 && name[1] == ':' &&
+		(name[0] >= 'a' && name[0] <= 'z' || name[0] >= 'A' && name[0] <= 'Z')
 }
 
 func (f *FS) Create(context.Context, string, os.FileMode) (io.WriteCloser, error) {

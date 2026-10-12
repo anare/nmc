@@ -13,6 +13,7 @@ import (
 	"github.com/anare/nmc/internal/editor"
 	"github.com/anare/nmc/internal/git"
 	"github.com/anare/nmc/internal/keymap"
+	"github.com/anare/nmc/internal/panel"
 	"github.com/anare/nmc/internal/sshfs"
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/anare/nmc/internal/viewer"
@@ -202,11 +203,12 @@ func TestF2SettingsPersistHiddenFilePreference(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyF2, 0, tcell.ModNone))
 	a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
 	a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
 	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
 	if a.panels[0].Opt.ShowHidden {
 		t.Fatal("settings menu did not turn hidden files off")
 	}
-	for range 5 {
+	for range 6 {
 		a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
 	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
@@ -237,6 +239,7 @@ func TestF2KeyTesterCapturesKeysAndRequiresTwoEscapes(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyF2, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
 	a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
 	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
 	if !a.keyTest {
@@ -440,6 +443,114 @@ func TestF3OpensViewerAndViewerSearchesThenCloses(t *testing.T) {
 	if a.viewer != nil {
 		t.Fatal("q did not close viewer")
 	}
+}
+
+func TestArchiveEnterF3ListingAndRootExit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archivePath := filepath.Join(t.TempDir(), "sample.nmcpack")
+	if err := os.WriteFile(archivePath, []byte("placeholder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := `[archive test]
+match = *.nmcpack
+list = printf nested/file.txt
+extract = mkdir -p "$DEST/nested"; printf contents > "$DEST/$ENTRY"
+`
+	if err := os.WriteFile(filepath.Join(home, ".bchandlers"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, vfs.NewLocal(), filepath.Dir(archivePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	panel := a.panels[0]
+	for index, entry := range panel.Entries {
+		if entry.Name == filepath.Base(archivePath) {
+			panel.MoveTo(index)
+			break
+		}
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF3, 0, tcell.ModNone))
+	if a.viewer == nil || !strings.Contains(string(a.viewer.Data), "nested/file.txt") {
+		t.Fatalf("F3 did not show archive listing: viewer=%#v status=%q", a.viewer, a.status)
+	}
+	a.viewer = nil
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if panel.FS.Name() != "archive:sample.nmcpack" || panel.Cwd != "/" || !panel.Nested() {
+		t.Fatalf("archive enter state: fs=%q cwd=%q nested=%v", panel.FS.Name(), panel.Cwd, panel.Nested())
+	}
+	panel.MoveTo(0)
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if panel.FS.Name() != "" || panel.Cwd != filepath.Dir(archivePath) || panel.Nested() || len(a.archiveFS) != 0 {
+		t.Fatalf("archive root did not return to host: fs=%q cwd=%q nested=%v tracked=%d", panel.FS.Name(), panel.Cwd, panel.Nested(), len(a.archiveFS))
+	}
+	if entry, ok := panel.Selected(); !ok || entry.Name != filepath.Base(archivePath) {
+		t.Fatalf("return selection = %#v", entry)
+	}
+}
+
+func TestF3UsesNamedOpenHandlerAndFallsBackWhenMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	file := filepath.Join(t.TempDir(), "preview.nmcview")
+	if err := os.WriteFile(file, []byte("preview contents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := `[open preview]
+match = *.nmcview
+run = sh -c 'printf opened > "$FILE.called"'
+`
+	if err := os.WriteFile(filepath.Join(home, ".bchandlers"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewLocal(), filepath.Dir(file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectLocalFile(t, a.panels[0], filepath.Base(file))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF3, 0, tcell.ModNone))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(file + ".called"); err == nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Stat(file + ".called"); err != nil || a.viewer != nil {
+		t.Fatalf("F3 did not launch named handler: viewer=%v err=%v status=%q", a.viewer != nil, err, a.status)
+	}
+
+	missingHome := t.TempDir()
+	t.Setenv("HOME", missingHome)
+	missingConfig := `[open preview]
+match = *.nmcview
+run = /definitely/not/installed
+`
+	if err := os.WriteFile(filepath.Join(missingHome, ".bchandlers"), []byte(missingConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fallback, err := New(newTestScreen(t, 80, 24), vfs.NewLocal(), filepath.Dir(file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectLocalFile(t, fallback.panels[0], filepath.Base(file))
+	fallback.HandleKey(tcell.NewEventKey(tcell.KeyF3, 0, tcell.ModNone))
+	if fallback.viewer == nil || fallback.status != "Open-with program unavailable; showing file" {
+		t.Fatalf("F3 fallback viewer=%v status=%q", fallback.viewer != nil, fallback.status)
+	}
+}
+
+func selectLocalFile(t *testing.T, p *panel.Panel, name string) {
+	t.Helper()
+	for index, entry := range p.Entries {
+		if entry.Name == name {
+			p.MoveTo(index)
+			return
+		}
+	}
+	t.Fatalf("panel does not contain %q", name)
 }
 
 func TestViewerActionsUseViewerKeymap(t *testing.T) {

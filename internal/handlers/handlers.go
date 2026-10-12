@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 type Kind string
@@ -31,6 +33,33 @@ type Handler struct {
 
 type Set struct {
 	handlers []Handler
+}
+
+const maxOutput = 32 << 20
+
+type limitedOutput struct {
+	mu        sync.Mutex
+	data      []byte
+	truncated bool
+}
+
+func (output *limitedOutput) Write(data []byte) (int, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	available := maxOutput - len(output.data)
+	if available > 0 {
+		output.data = append(output.data, data[:min(len(data), available)]...)
+	}
+	if len(data) > available {
+		output.truncated = true
+	}
+	return len(data), nil
+}
+
+func (output *limitedOutput) result() ([]byte, bool) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return append([]byte(nil), output.data...), output.truncated
 }
 
 func Defaults() []Handler {
@@ -163,6 +192,11 @@ func (set *Set) All(kind Kind) []Handler {
 	return result
 }
 
+func DefaultSet() *Set {
+	set := &Set{handlers: Defaults()}
+	return set
+}
+
 func (set *Set) Archive(name string) (Handler, bool) {
 	return set.resolve(Archive, name, false)
 }
@@ -181,6 +215,10 @@ func (set *Set) resolve(kind Kind, name string, namedOnly bool) (Handler, bool) 
 	best := -1
 	for _, handler := range set.handlers {
 		if handler.Kind != kind {
+			continue
+		}
+		if handler.Kind == Archive && (handler.List == "" || handler.Extract == "") ||
+			handler.Kind == Open && handler.Run == "" {
 			continue
 		}
 		for _, pattern := range handler.Patterns {
@@ -234,6 +272,46 @@ func Run(ctx context.Context, command string, values map[string]string) ([]byte,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	cmd, err := prepareCommand(ctx, command, values)
+	if err != nil {
+		return nil, err
+	}
+	buffer := &limitedOutput{}
+	cmd.Stdout, cmd.Stderr = buffer, buffer
+	err = cmd.Run()
+	output, truncated := buffer.result()
+	if truncated {
+		return output, errors.New("handler output exceeds 32 MiB")
+	}
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return output, errors.New(message)
+	}
+	return output, nil
+}
+
+func Start(ctx context.Context, command string, values map[string]string) (*exec.Cmd, error) {
+	if strings.TrimSpace(command) == "" {
+		return nil, errors.New("handler command is empty")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd, err := prepareCommand(ctx, command, values)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
+}
+
+func prepareCommand(ctx context.Context, command string, values map[string]string) (*exec.Cmd, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Env = make([]string, 0, len(os.Environ())+len(values))
 	for _, item := range os.Environ() {
@@ -250,15 +328,7 @@ func Run(ctx context.Context, command string, values map[string]string) ([]byte,
 			return nil, fmt.Errorf("unsupported handler variable %q", key)
 		}
 	}
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		message := strings.TrimSpace(string(output))
-		if message == "" {
-			message = err.Error()
-		}
-		return output, errors.New(message)
-	}
-	return output, nil
+	return cmd, nil
 }
 
 func ProgramAvailable(command string) bool {

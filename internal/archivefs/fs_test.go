@@ -38,6 +38,7 @@ func TestParseListingRejectsUnsafeAndConflictingPaths(t *testing.T) {
 		"../escape\n",
 		"nested/../../escape\n",
 		"nested\\escape\n",
+		"C:/outside\n",
 		"same\nsame/child\n",
 	} {
 		if _, _, err := parseListing([]byte(listing)); err == nil {
