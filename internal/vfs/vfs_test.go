@@ -50,6 +50,7 @@ func TestMemFilesystemSupportsDirectoriesAndFiles(t *testing.T) {
 	if err := fs.Mkdir(ctx, "/docs/new"); err != nil {
 		t.Fatal(err)
 	}
+
 	writer, err := fs.Create(ctx, "/docs/new/readme.txt", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +76,28 @@ func TestMemFilesystemSupportsDirectoriesAndFiles(t *testing.T) {
 	data, err := io.ReadAll(reader)
 	if err != nil || string(data) != "memory" {
 		t.Fatalf("unexpected file contents %q, error %v", data, err)
+	}
+}
+
+func TestMemFilesystemFollowsSymlinksWhenOpeningFiles(t *testing.T) {
+	ctx := context.Background()
+	fs := NewMemFS("test")
+	fs.PutFile("/target.txt", []byte("target"), 0o644)
+	if err := fs.Symlink(ctx, "target.txt", "/link.txt"); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := fs.Stat(ctx, "/link.txt")
+	if err != nil || !entry.IsLink || entry.Broken || entry.IsDir {
+		t.Fatalf("unexpected symlink metadata: %#v, error: %v", entry, err)
+	}
+	reader, err := fs.Open(ctx, "/link.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != "target" {
+		t.Fatalf("symlink contents = %q, error = %v", data, err)
 	}
 }
 

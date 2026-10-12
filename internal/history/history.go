@@ -39,6 +39,9 @@ func Open(path string) (*Store, error) {
 	if err := json.Unmarshal(data, &store.entries); err != nil {
 		return nil, err
 	}
+	if store.entries == nil {
+		store.entries = make(map[Kind][]string)
+	}
 	for kind, entries := range store.entries {
 		if len(entries) > maxEntries {
 			store.entries[kind] = entries[:maxEntries]

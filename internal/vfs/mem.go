@@ -182,9 +182,27 @@ func (m *MemFS) Open(ctx context.Context, name string) (io.ReadCloser, error) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	node, ok := m.nodes[m.clean(name)]
+	name = m.clean(name)
+	node, ok := m.nodes[name]
 	if !ok {
 		return nil, os.ErrNotExist
+	}
+	for range 40 {
+		if !node.entry.IsLink {
+			break
+		}
+		target := node.target
+		if !path.IsAbs(target) {
+			target = path.Join(path.Dir(name), target)
+		}
+		name = m.clean(target)
+		node, ok = m.nodes[name]
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+	}
+	if node.entry.IsLink {
+		return nil, errors.New("too many symlink levels")
 	}
 	if node.content == nil {
 		return nil, errors.New("not a regular file")

@@ -53,6 +53,7 @@ func TestHistoryCursorRestoresTheCurrentDraft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	store.Add(Command, "ls")
 	cursor := store.Cursor(Command)
 	if got := cursor.Prev("draft"); got != "ls" {
@@ -64,5 +65,20 @@ func TestHistoryCursorRestoresTheCurrentDraft(t *testing.T) {
 	cursor.Reset()
 	if got := cursor.Next("still here"); got != "still here" {
 		t.Fatalf("next on reset cursor = %q, want original input", got)
+	}
+}
+
+func TestHistoryNullFileCanBeLoadedAndWritten(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history")
+	if err := os.WriteFile(path, []byte("null"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Add(Command, "pwd")
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
 	}
 }

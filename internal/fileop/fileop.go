@@ -614,5 +614,12 @@ func runtimeOSIsWindows() bool { return os.PathSeparator == '\\' }
 
 func isCrossDeviceRenameError(err error) bool {
 	var linkErr *os.LinkError
-	return errors.As(err, &linkErr) && errors.Is(linkErr.Err, syscall.EXDEV)
+	if errors.As(err, &linkErr) && errors.Is(linkErr.Err, syscall.EXDEV) {
+		return true
+	}
+	if err != nil && os.PathSeparator == '\\' {
+		message := strings.ToLower(err.Error())
+		return strings.Contains(message, "not same device") || strings.Contains(message, "cross-device")
+	}
+	return false
 }

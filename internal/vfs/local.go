@@ -18,6 +18,11 @@ func (Local) List(ctx context.Context, dir string) ([]Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	dir = absolute
 	items, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
