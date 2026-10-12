@@ -64,7 +64,7 @@ func Load(path string) (*Set, []string) {
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			fields := strings.Fields(strings.TrimSpace(line[1 : len(line)-1]))
 			if len(fields) != 2 || Kind(strings.ToLower(fields[0])) != Archive && Kind(strings.ToLower(fields[0])) != Open {
-				current = nil
+				current = -1
 				problems = append(problems, fmt.Sprintf("line %d: expected [archive name] or [open name]", lineNumber))
 				continue
 			}
