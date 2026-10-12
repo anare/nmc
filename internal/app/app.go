@@ -44,6 +44,9 @@ type App struct {
 	status                      string
 	quit                        bool
 	ctrlXPending                bool
+	quickSearching              bool
+	quickQuery                  string
+	quickMatch                  bool
 	dialog                      *dialog.Dialog
 	cmd                         *dialog.TextInput
 	output                      *shell.Buffer
@@ -182,6 +185,12 @@ func (a *App) Run() error {
 					a.findState.searching = false
 					a.findState.err = update.err
 				}
+			case directorySizesFinished:
+				if update.err != nil {
+					a.dialog = dialog.NewMessage("Directory sizes", []string{update.err.Error()}, true)
+				} else {
+					a.dialog = dialog.NewList("Directory sizes", strings.Split(strings.TrimSuffix(string(update.output), "\n"), "\n"))
+				}
 			}
 		}
 	}
@@ -249,15 +258,30 @@ func (a *App) Draw() {
 	a.panels[1].SetRect(leftWidth, 0, rightWidth, panelHeight)
 	a.panels[0].Draw(a.screen, a.theme)
 	a.panels[1].Draw(a.screen, a.theme)
-	ui.Text(a.screen, 0, height-3, min(width, 16), a.panels[a.active].Cwd+">", a.theme.HintKey)
+	prompt := a.panels[a.active].Cwd + ">"
+	if a.quickSearching {
+		prompt = "Search:"
+	}
+	ui.Text(a.screen, 0, height-3, min(width, 16), prompt, a.theme.HintKey)
 	promptWidth := min(width, 16)
-	a.cmd.Draw(a.screen, promptWidth, height-3, width-promptWidth, a.theme.Panel)
+	if a.quickSearching {
+		searchInput := dialog.NewTextInput(a.quickQuery)
+		searchInput.Draw(a.screen, promptWidth, height-3, width-promptWidth, a.theme.Panel)
+	} else {
+		a.cmd.Draw(a.screen, promptWidth, height-3, width-promptWidth, a.theme.Panel)
+	}
 
 	statusStyle := a.theme.Panel
 	if a.panels[a.active].Err != nil {
 		statusStyle = a.theme.BrokenLink
 		if a.status == "" {
 			a.status = a.panels[a.active].Err.Error()
+		}
+		if a.quickSearching {
+			a.status = "Quick search: " + a.quickQuery
+			if a.quickQuery != "" && !a.quickMatch {
+				a.status += " (no match)"
+			}
 		}
 	}
 	ui.TextPadded(a.screen, 0, height-2, width, strings.TrimSpace(a.status), statusStyle)
@@ -484,6 +508,15 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 	}
 	a.status = ""
 	active := a.panels[a.active]
+	if a.quickSearching && a.handleQuickSearchKey(event, active) {
+		return
+	}
+	if event.Key() == tcell.KeyEnter && event.Modifiers()&tcell.ModAlt != 0 {
+		if action, ok := a.keys.Lookup(keymap.Panel, event); ok {
+			a.dispatchPanelAction(action)
+			return
+		}
+	}
 	if event.Key() == tcell.KeyEnter && a.cmd.Empty() {
 		if entry, ok := active.Selected(); ok {
 			if entry.IsUp {
@@ -507,26 +540,7 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		return
 	}
 	if event.Key() == tcell.KeyEnter && !a.cmd.Empty() {
-		a.runCommand(a.cmd.Text(), event.Modifiers()&tcell.ModAlt != 0)
-		return
-	}
-	if event.Key() == tcell.KeyCtrlY {
-		a.cmd.SetText("")
-		return
-	}
-	if event.Key() == tcell.KeyCtrlC && a.job != nil {
-		_ = a.job.Kill()
-		a.status = "Stopping command"
-		return
-	}
-	if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModAlt != 0 && (event.Rune() == 'p' || event.Rune() == 'n') {
-		if a.cmdHistory != nil {
-			if event.Rune() == 'p' {
-				a.cmd.SetText(a.cmdHistory.Prev(a.cmd.Text()))
-			} else {
-				a.cmd.SetText(a.cmdHistory.Next(a.cmd.Text()))
-			}
-		}
+		a.runCommand(a.cmd.Text(), false)
 		return
 	}
 	if a.commandLineOwns(event) {
@@ -635,6 +649,14 @@ func (a *App) dispatchPanelAction(action string) {
 		}
 	case "open-shell":
 		a.toggleShell()
+	case "swap-panels":
+		a.panels[0], a.panels[1] = a.panels[1], a.panels[0]
+	case "quick-search":
+		a.quickSearching = true
+		a.quickQuery = ""
+		a.quickMatch = true
+	case "dir-sizes":
+		a.showDirectorySizes(active)
 	case "open-with":
 		a.openWithSelected()
 	case "output-log":
@@ -657,6 +679,32 @@ func (a *App) dispatchPanelAction(action string) {
 		other := a.panels[1-a.active]
 		if err := other.SetDir(context.Background(), active.Cwd, ""); err != nil {
 			a.status = err.Error()
+		}
+	case "history-browser":
+		a.showHistoryBrowser()
+	case "history-prev":
+		if a.cmdHistory != nil {
+			a.cmd.SetText(a.cmdHistory.Prev(a.cmd.Text()))
+		}
+	case "history-next":
+		if a.cmdHistory != nil {
+			a.cmd.SetText(a.cmdHistory.Next(a.cmd.Text()))
+		}
+	case "clear-line":
+		a.cmd.SetText("")
+		if a.cmdHistory != nil {
+			a.cmdHistory.Reset()
+		}
+	case "stop-command":
+		if a.job != nil {
+			_ = a.job.Kill()
+			a.status = "Stopping command"
+		}
+	case "run-on-terminal":
+		if a.cmd.Empty() {
+			a.status = "Enter a command first"
+		} else {
+			a.runCommand(a.cmd.Text(), true)
 		}
 	default:
 		a.status = "Action is not available yet: " + action
@@ -1010,6 +1058,11 @@ func (a *App) runCommand(command string, interactive bool) {
 		}
 		return
 	}
+	if a.history != nil {
+		a.history.Add(history.Command, command)
+		_ = a.history.Save()
+		a.cmdHistory = a.history.Cursor(history.Command)
+	}
 	if interactive {
 		_ = a.screen.Suspend()
 		err := shell.RunInteractive(context.Background(), shell.Default(), a.panels[a.active].Cwd, command)
@@ -1018,11 +1071,6 @@ func (a *App) runCommand(command string, interactive bool) {
 			a.status = err.Error()
 		}
 		return
-	}
-	if a.history != nil {
-		a.history.Add(history.Command, command)
-		_ = a.history.Save()
-		a.cmdHistory = a.history.Cursor(history.Command)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a.commandCtx = cancel
@@ -1048,6 +1096,83 @@ func (a *App) finishCommand(err error) {
 		a.commandCtx = nil
 	}
 	a.status = fmt.Sprintf("Command finished (exit %d)", shell.ExitCode(err))
+}
+
+func (a *App) handleQuickSearchKey(event *tcell.EventKey, active *panel.Panel) bool {
+	switch event.Key() {
+	case tcell.KeyEscape, tcell.KeyEnter:
+		a.quickSearching = false
+		a.quickQuery = ""
+		a.quickMatch = true
+		return true
+	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		runes := []rune(a.quickQuery)
+		if len(runes) > 0 {
+			a.quickQuery = string(runes[:len(runes)-1])
+			a.findQuickSearchMatch(active)
+		}
+		return true
+	case tcell.KeyUp:
+		active.MoveBy(-1)
+		return true
+	case tcell.KeyDown:
+		active.MoveBy(1)
+		return true
+	case tcell.KeyRune:
+		if event.Modifiers() == tcell.ModNone && event.Rune() >= ' ' {
+			a.quickQuery += string(event.Rune())
+			a.findQuickSearchMatch(active)
+			return true
+		}
+	}
+	a.quickSearching = false
+	a.quickQuery = ""
+	a.quickMatch = true
+	return false
+}
+
+func (a *App) findQuickSearchMatch(active *panel.Panel) {
+	a.quickMatch = false
+	if a.quickQuery == "" || len(active.Entries) == 0 {
+		return
+	}
+	needle := strings.ToLower(a.quickQuery)
+	for offset := 0; offset < len(active.Entries); offset++ {
+		index := (active.Cursor + offset) % len(active.Entries)
+		if strings.HasPrefix(strings.ToLower(active.Entries[index].Name), needle) {
+			active.MoveTo(index)
+			a.quickMatch = true
+			return
+		}
+	}
+}
+
+func (a *App) showHistoryBrowser() {
+	if a.cmdHistory == nil || a.history == nil {
+		a.status = "Command history is unavailable"
+		return
+	}
+	cursor := a.history.Cursor(history.Command)
+	a.dialog = dialog.NewHistoryBrowser("Command history", cursor, func(result dialog.Result) {
+		if result.OK() {
+			a.cmd.SetText(result.Text)
+			a.cmdHistory = a.history.Cursor(history.Command)
+		}
+	})
+}
+
+func (a *App) showDirectorySizes(active *panel.Panel) {
+	if active.FS.Name() != "" {
+		a.status = "Directory sizes are available only for local panels"
+		return
+	}
+	ctx := context.Background()
+	directory := active.Cwd
+	a.status = "Calculating directory sizes…"
+	go func() {
+		output, err := shell.Run(ctx, shell.Default(), directory, "du -h -d 1 -- .")
+		_ = a.screen.PostEvent(tcell.NewEventInterrupt(directorySizesFinished{output: output, err: err}))
+	}()
 }
 
 func (a *App) promptOperation(op string) {
@@ -2104,3 +2229,7 @@ type shellOutputUpdate struct{}
 type shellSessionFinished struct{}
 type findHitEvent struct{ hit find.Hit }
 type findDoneEvent struct{ err error }
+type directorySizesFinished struct {
+	output []byte
+	err    error
+}

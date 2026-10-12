@@ -52,6 +52,7 @@ type Dialog struct {
 	mode          mode
 	onCancel      func()
 	OnDone        func(Result)
+	history       *history.Cursor
 }
 
 func NewMessage(title string, lines []string, isError bool) *Dialog {
@@ -71,6 +72,15 @@ func NewPicker(title string, items []string, onDone func(Result)) *Dialog {
 
 func NewHistBrowser(title string, items []string, onDone func(Result)) *Dialog {
 	return NewPicker(title, items, onDone)
+}
+
+func NewHistoryBrowser(title string, cursor *history.Cursor, onDone func(Result)) *Dialog {
+	dialog := NewPicker(title, nil, onDone)
+	dialog.history = cursor
+	if cursor != nil {
+		dialog.Items = cursor.Entries()
+	}
+	return dialog
 }
 
 func NewMenu(title string, items []string, onDone func(Result)) *Dialog {
@@ -111,6 +121,17 @@ func (d *Dialog) SetProgress(percent int, info string) {
 
 func (d *Dialog) HandleKey(event *tcell.EventKey) (bool, Result) {
 	cancel := Result{Button: -1, Cancelled: true}
+	if d.mode == pickerMode && d.history != nil && event.Key() == tcell.KeyCtrlD {
+		indices := d.visibleItemIndices()
+		if d.Selected >= 0 && d.Selected < len(indices) {
+			item := d.Items[indices[d.Selected]]
+			if _, err := d.history.Forget(item); err == nil {
+				d.Items = d.history.Entries()
+				d.Selected = min(d.Selected, max(0, len(d.visibleItemIndices())-1))
+			}
+		}
+		return false, Result{}
+	}
 	if d.mode == inputMode && d.Combo {
 		if d.ComboOpen {
 			switch event.Key() {

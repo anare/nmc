@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anare/nmc/internal/dialog"
 	"github.com/anare/nmc/internal/editor"
 	"github.com/anare/nmc/internal/git"
+	"github.com/anare/nmc/internal/history"
 	"github.com/anare/nmc/internal/keymap"
 	"github.com/anare/nmc/internal/panel"
 	"github.com/anare/nmc/internal/sshfs"
@@ -74,6 +76,124 @@ func TestHandleKeySwitchesPanelsAndNavigatesDirectories(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModNone))
 	if a.panels[1].Cwd != "/alpha" {
 		t.Fatalf("Backspace changed directory to %q; only Left should go up", a.panels[1].Cwd)
+	}
+}
+
+func TestPanelKeymapSwapsPanelsAndQuickSearchSelectsEntries(t *testing.T) {
+	fs := vfs.NewMemFS("test")
+	fs.Put("/", []vfs.Entry{{Name: "alpha"}, {Name: "beta"}, {Name: "bravo"}})
+	a, err := New(newTestScreen(t, 80, 24), fs, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.panels[1].SetDir(context.Background(), "/", "bravo"); err != nil {
+		t.Fatal(err)
+	}
+	left, right := a.panels[0], a.panels[1]
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlU, 0, tcell.ModCtrl))
+	if a.panels[0] != right || a.panels[1] != left || a.active != 0 {
+		t.Fatal("Ctrl-U did not exchange panel contents while preserving the active side")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlS, 0, tcell.ModCtrl))
+	if !a.quickSearching {
+		t.Fatal("Ctrl-S did not start panel quick search")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'b', tcell.ModNone))
+	if selected, _ := a.panels[0].Selected(); selected.Name != "bravo" {
+		t.Fatalf("quick-search selected %q, want bravo", selected.Name)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	if a.quickSearching {
+		t.Fatal("Escape did not leave quick search")
+	}
+}
+
+func TestCommandHistoryNavigationBrowserAndClearFollowKeymap(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.history.Add(history.Command, "echo older")
+	a.history.Add(history.Command, "echo newer")
+	if err := a.history.Save(); err != nil {
+		t.Fatal(err)
+	}
+	a.cmdHistory = a.history.Cursor(history.Command)
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'p', tcell.ModAlt))
+	if a.cmd.Text() != "echo newer" {
+		t.Fatalf("Alt-P command line = %q", a.cmd.Text())
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'p', tcell.ModAlt))
+	if a.cmd.Text() != "echo older" {
+		t.Fatalf("second Alt-P command line = %q", a.cmd.Text())
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'n', tcell.ModAlt))
+	if a.cmd.Text() != "echo newer" {
+		t.Fatalf("Alt-N command line = %q", a.cmd.Text())
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'h', tcell.ModAlt))
+	if a.dialog == nil || a.dialog.Title != "Command history" {
+		t.Fatalf("Alt-H history browser = %#v", a.dialog)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlD, 0, tcell.ModCtrl))
+	if got := a.history.Cursor(history.Command).Entries(); len(got) != 1 || got[0] != "echo older" {
+		t.Fatalf("Ctrl-D did not forget the selected history entry: %q", got)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.dialog != nil || a.cmd.Text() != "echo older" {
+		t.Fatalf("history selection text=%q dialog=%v", a.cmd.Text(), a.dialog)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlY, 0, tcell.ModCtrl))
+	if !a.cmd.Empty() {
+		t.Fatalf("Ctrl-Y did not clear command line: %q", a.cmd.Text())
+	}
+}
+
+func TestDirectorySizesRunAsynchronouslyForLocalPanels(t *testing.T) {
+	if _, err := exec.LookPath("du"); err != nil {
+		t.Skip("du is not installed")
+	}
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "data.txt"), []byte("contents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, vfs.NewLocal(), directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlL, 0, tcell.ModCtrl))
+	if a.dialog != nil || !strings.Contains(a.status, "Calculating") {
+		t.Fatalf("directory sizes did not start asynchronously: dialog=%v status=%q", a.dialog, a.status)
+	}
+	result := make(chan directorySizesFinished, 1)
+	go func() {
+		for {
+			if interrupt, ok := screen.PollEvent().(*tcell.EventInterrupt); ok {
+				if finished, ok := interrupt.Data().(directorySizesFinished); ok {
+					result <- finished
+					return
+				}
+			}
+		}
+	}()
+	var finished directorySizesFinished
+	select {
+	case finished = <-result:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for directory size output")
+	}
+	if finished.err != nil {
+		t.Fatalf("directory size command failed: %v output=%q", finished.err, finished.output)
+	}
+	if !strings.Contains(string(finished.output), "data.txt") && !strings.Contains(string(finished.output), ".") {
+		t.Fatalf("directory size output = %q", finished.output)
+	}
+	a.dialog = dialog.NewList("Directory sizes", strings.Split(strings.TrimSuffix(string(finished.output), "\n"), "\n"))
+	if a.dialog == nil || !strings.Contains(strings.Join(a.dialog.Lines, "\n"), ".") {
+		t.Fatalf("directory sizes list = %#v", a.dialog)
 	}
 }
 
