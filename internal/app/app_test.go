@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anare/nmc/internal/editor"
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/anare/nmc/internal/viewer"
 	"github.com/gdamore/tcell/v2"
@@ -278,6 +279,49 @@ func TestViewerAltNOnlyTogglesLineNumbers(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'n', tcell.ModNone))
 	if a.viewer.Top != 1 {
 		t.Fatalf("plain n top = %d, want next search hit on line 2", a.viewer.Top)
+	}
+}
+
+func TestF4EditsAndPromptsBeforeDiscardingChanges(t *testing.T) {
+	screen := newTestScreen(t, 80, 24)
+	fs := vfs.NewMemFS("test")
+	fs.PutFile("/notes.txt", []byte("hello"), 0o644)
+	a, err := New(screen, fs, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF4, 0, tcell.ModNone))
+	if a.editor == nil || a.editor.Path != "/notes.txt" {
+		t.Fatalf("F4 did not open editor: editor=%v status=%q", a.editor, a.status)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, '!', tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF10, 0, tcell.ModNone))
+	if a.dialog == nil || a.dialog.Title != "Unsaved changes" {
+		t.Fatal("quit did not prompt for unsaved changes")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.editor != nil {
+		t.Fatal("discard did not close editor")
+	}
+	reader, err := fs.Open(context.Background(), "/notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 5)
+	_, _ = reader.Read(data)
+	_ = reader.Close()
+	if string(data) != "hello" {
+		t.Fatalf("discard changed file contents to %q", data)
+	}
+
+	opened, err := editor.Open(context.Background(), fs, "/notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Changed {
+		t.Fatal("new editor should start clean")
 	}
 }
 

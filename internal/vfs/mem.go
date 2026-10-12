@@ -302,11 +302,17 @@ func (m *MemFS) Rename(ctx context.Context, from, to string) error {
 	if !ok {
 		return os.ErrNotExist
 	}
-	if _, ok := m.nodes[to]; ok {
-		return os.ErrExist
+	if from == to {
+		return nil
 	}
 	if parent, ok := m.nodes[path.Dir(to)]; !ok || !parent.entry.IsDir {
 		return os.ErrNotExist
+	}
+	if destination, exists := m.nodes[to]; exists {
+		if destination.entry.IsDir || node.entry.IsDir {
+			return os.ErrExist
+		}
+		delete(m.nodes, to)
 	}
 	prefix := strings.TrimSuffix(from, "/") + "/"
 	updates := map[string]*memNode{}

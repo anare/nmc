@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/anare/nmc/internal/dialog"
+	"github.com/anare/nmc/internal/editor"
 	"github.com/anare/nmc/internal/fileop"
 	"github.com/anare/nmc/internal/history"
 	"github.com/anare/nmc/internal/panel"
@@ -34,6 +36,7 @@ type App struct {
 	output     *shell.Buffer
 	opCancel   context.CancelFunc
 	viewer     *viewer.Viewer
+	editor     *editor.Editor
 	history    *history.Store
 	cmdHistory *history.Cursor
 	job        *shell.Job
@@ -119,6 +122,20 @@ func (a *App) Draw() {
 		a.screen.Show()
 		return
 	}
+	if a.editor != nil {
+		a.editor.Draw(a.screen, ui.Rect{X: 0, Y: 0, W: width, H: height - 2}, a.theme)
+		status := ""
+		if a.editor.Changed {
+			status = "Modified"
+		}
+		ui.TextPadded(a.screen, 0, height-2, width, status, a.theme.Panel)
+		a.drawHints(height)
+		if a.dialog != nil {
+			a.dialog.Draw(a.screen, a.theme)
+		}
+		a.screen.Show()
+		return
+	}
 
 	panelHeight := height - 3
 	leftWidth := width / 2
@@ -149,7 +166,9 @@ func (a *App) Draw() {
 func (a *App) drawHints(height int) {
 	width, _ := a.screen.Size()
 	var hints [10]string
-	if a.viewer != nil {
+	if a.editor != nil {
+		hints[1], hints[3], hints[4], hints[7] = "Save", "Delete line", "Search", "Quit"
+	} else if a.viewer != nil {
 		hints[1], hints[2], hints[3], hints[4], hints[6], hints[7] = "Wrap", "Quit", "Hex", "Copy", "Search", "Raw"
 	} else {
 		hints[2], hints[3], hints[4], hints[5], hints[6], hints[7], hints[9] = "View", "Copy", "Move", "Mkdir", "Delete", "Refresh", "Quit"
@@ -171,6 +190,10 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 	}
 	if a.viewer != nil {
 		a.handleViewerKey(event)
+		return
+	}
+	if a.editor != nil {
+		a.handleEditorKey(event)
 		return
 	}
 	a.status = ""
@@ -265,6 +288,8 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		a.confirmDelete()
 	case tcell.KeyF3:
 		a.openViewer()
+	case tcell.KeyF4:
+		a.openEditor()
 	case tcell.KeyRune:
 		if event.Modifiers() == tcell.ModNone && event.Rune() >= ' ' {
 			a.cmd.HandleKey(event)
@@ -454,6 +479,98 @@ func (a *App) openViewer() {
 		return
 	}
 	a.viewer = view
+}
+
+func (a *App) openEditor() {
+	p := a.panels[a.active]
+	entry, ok := p.Selected()
+	if !ok || entry.IsUp || entry.IsDir {
+		a.status = "F4 requires a file"
+		return
+	}
+	opened, err := editor.Open(context.Background(), p.FS, p.CurrentPath())
+	if errors.Is(err, editor.ErrBinary) {
+		path := p.CurrentPath()
+		a.dialog = dialog.NewConfirm("Binary file", []string{"Byte mode edits one byte per character without text conversion."}, []string{"Open bytes", "Cancel"}, func(result dialog.Result) {
+			if !result.OK() {
+				return
+			}
+			opened, err := editor.OpenBinary(context.Background(), p.FS, path)
+			if err != nil {
+				a.dialog = dialog.NewMessage("Edit", []string{err.Error()}, true)
+				return
+			}
+			a.editor = opened
+		})
+		return
+	}
+	if err != nil {
+		a.dialog = dialog.NewMessage("Edit", []string{err.Error()}, true)
+		return
+	}
+	a.editor = opened
+}
+
+func (a *App) handleEditorKey(event *tcell.EventKey) {
+	e := a.editor
+	switch event.Key() {
+	case tcell.KeyF2, tcell.KeyCtrlS:
+		if err := e.Save(context.Background()); err != nil {
+			a.dialog = dialog.NewMessage("Save", []string{err.Error()}, true)
+		} else {
+			a.status = "Saved"
+		}
+	case tcell.KeyF5:
+		a.dialog = dialog.NewInput("Go to line", "Line: ", fmt.Sprint(e.Y+1), func(result dialog.Result) {
+			if result.OK() {
+				var line int
+				if _, err := fmt.Sscan(result.Text, &line); err != nil {
+					a.status = "Enter a line number"
+					return
+				}
+				e.Y = min(max(line-1, 0), len(e.Lines)-1)
+				e.X = min(e.X, len(e.Lines[e.Y]))
+			}
+		})
+	case tcell.KeyF7:
+		a.dialog = dialog.NewInput("Search", "Pattern: ", "", func(result dialog.Result) {
+			if result.OK() && result.Text != "" {
+				e.Search(result.Text)
+			}
+		})
+	case tcell.KeyF8:
+		e.DeleteLine()
+	case tcell.KeyF10, tcell.KeyF3, tcell.KeyEscape:
+		a.closeEditor()
+	case tcell.KeyRune:
+		if event.Modifiers()&tcell.ModAlt != 0 && event.Rune() == 'n' {
+			e.LineNumber = !e.LineNumber
+			return
+		}
+		e.HandleKey(event)
+	default:
+		e.HandleKey(event)
+	}
+}
+
+func (a *App) closeEditor() {
+	e := a.editor
+	if !e.Changed {
+		a.editor = nil
+		return
+	}
+	a.dialog = dialog.NewConfirm("Unsaved changes", []string{"Save changes before leaving?"}, []string{"Save", "Discard", "Cancel"}, func(result dialog.Result) {
+		switch result.Button {
+		case 0:
+			if err := e.Save(context.Background()); err != nil {
+				a.dialog = dialog.NewMessage("Save", []string{err.Error()}, true)
+				return
+			}
+			a.editor = nil
+		case 1:
+			a.editor = nil
+		}
+	})
 }
 
 func (a *App) handleViewerKey(event *tcell.EventKey) {
