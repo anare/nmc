@@ -251,6 +251,10 @@ func (m *Map) Lookup(mode Mode, event *tcell.EventKey) (string, bool) {
 	return action, ok
 }
 
+func (m *Map) Owner(mode Mode, binding Binding) string {
+	return m.bindings[mode][binding]
+}
+
 func (m *Map) Rebind(mode Mode, action string, bindings ...Binding) error {
 	if defaultAction(mode, action) == "" {
 		return fmt.Errorf("unknown action %q in mode %q", action, mode)
