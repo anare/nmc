@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/anare/nmc/internal/fileop"
+	"github.com/anare/nmc/internal/history"
+	"github.com/anare/nmc/internal/vfs"
 	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -123,7 +127,7 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 		return err
 	}
 
-	entries, err := os.ReadDir(absPath)
+	entries, err := vfs.NewLocal().List(context.Background(), absPath)
 	if err != nil {
 		return err
 	}
@@ -132,30 +136,26 @@ func (p *panel) load(path string, selectIndex int, addHistory bool) error {
 		p.marked = map[string]bool{}
 	}
 
-	items := make([]listItem, 0, len(entries)+1)
+	items := make([]listItem, 0, len(entries))
 	parent := filepath.Dir(absPath)
-	if parent != absPath || runtime.GOOS == "windows" {
-		items = append(items, listItem{name: "..", path: parent, isDir: true})
-	}
-
 	for _, e := range entries {
-		name := e.Name()
+		name := e.Name
+		if e.IsUp {
+			items = append(items, listItem{name: "..", path: parent, isDir: true})
+			continue
+		}
 		if !p.showHidden && strings.HasPrefix(name, ".") {
 			continue
 		}
 		fullPath := filepath.Join(absPath, name)
-		info, infoErr := e.Info()
-		if infoErr != nil {
-			continue
-		}
 		items = append(items, listItem{
 			name:    name,
 			path:    fullPath,
-			isDir:   e.IsDir(),
-			size:    info.Size(),
-			modTime: info.ModTime(),
+			isDir:   e.IsDir,
+			size:    e.Size,
+			modTime: e.ModTime,
 			ext:     strings.ToLower(filepath.Ext(name)),
-			mode:    info.Mode(),
+			mode:    e.Mode,
 		})
 	}
 
@@ -479,6 +479,8 @@ type appState struct {
 	termOSC    bool
 	termOSCEsc bool
 	cmdInput   *tview.InputField
+	histStore  *history.Store
+	cmdHistory *history.Cursor
 }
 
 func (s *appState) setStatus(msg string) {
@@ -492,6 +494,10 @@ func (s *appState) executeCommandLine() {
 	raw := s.cmdInput.GetText()
 	if strings.TrimSpace(raw) == "" {
 		return
+	}
+	if s.histStore != nil {
+		s.histStore.Add(history.Command, raw)
+		s.cmdHistory = s.histStore.Cursor(history.Command)
 	}
 	s.cmdInput.SetText("")
 	w := s.currentShellWriter()
@@ -1470,21 +1476,32 @@ func (s *appState) copySelected() {
 		s.setStatus("F5 copy: nothing selected")
 		return
 	}
-	copied := 0
+	eligible := make([]string, 0, len(targets))
 	for _, src := range targets {
 		dst := filepath.Join(b.path, filepath.Base(src))
-		if pathsEqual(src, dst) {
-			continue
+		if !pathsEqual(src, dst) {
+			eligible = append(eligible, src)
 		}
-		if err := copyPath(src, dst); err != nil {
-			s.setError("Copy", src, err)
-			return
-		}
-		copied++
 	}
-	a.clearSelection()
-	s.refreshPanels()
-	s.setStatus(fmt.Sprintf("Copied %d item(s) to %s", copied, b.path))
+	if len(eligible) == 0 {
+		s.setStatus("Copied 0 items")
+		return
+	}
+	pairs, err := fileop.Plan(eligible, b.path)
+	if err != nil {
+		s.setError("Copy", b.path, err)
+		return
+	}
+	result := fileop.Run(context.Background(), fileop.Operation{Op: "Copy", Pairs: pairs}, nil)
+	if result.Items > 0 {
+		a.clearSelection()
+		s.refreshPanels()
+	}
+	if err := result.Err(); err != nil {
+		s.setError("Copy", b.path, err)
+		return
+	}
+	s.setStatus(fmt.Sprintf("Copied %d item(s) to %s", result.Items, b.path))
 }
 
 func (s *appState) moveSelected() {
@@ -1495,21 +1512,32 @@ func (s *appState) moveSelected() {
 		s.setStatus("F6 move: nothing selected")
 		return
 	}
-	moved := 0
+	eligible := make([]string, 0, len(targets))
 	for _, src := range targets {
 		dst := filepath.Join(b.path, filepath.Base(src))
-		if pathsEqual(src, dst) {
-			continue
+		if !pathsEqual(src, dst) {
+			eligible = append(eligible, src)
 		}
-		if err := movePath(src, dst); err != nil {
-			s.setError("Move", src, err)
-			return
-		}
-		moved++
 	}
-	a.clearSelection()
-	s.refreshPanels()
-	s.setStatus(fmt.Sprintf("Moved %d item(s) to %s", moved, b.path))
+	if len(eligible) == 0 {
+		s.setStatus("Moved 0 items")
+		return
+	}
+	pairs, err := fileop.Plan(eligible, b.path)
+	if err != nil {
+		s.setError("Move", b.path, err)
+		return
+	}
+	result := fileop.Run(context.Background(), fileop.Operation{Op: "Move", Pairs: pairs}, nil)
+	if result.Items > 0 {
+		a.clearSelection()
+		s.refreshPanels()
+	}
+	if err := result.Err(); err != nil {
+		s.setError("Move", b.path, err)
+		return
+	}
+	s.setStatus(fmt.Sprintf("Moved %d item(s) to %s", result.Items, b.path))
 }
 
 func (s *appState) makeDirectory() {
@@ -1921,6 +1949,11 @@ func run() error {
 	cmdInput.SetTitle(" Command line ")
 	cmdInput.SetBorderColor(mcAccentMuted)
 
+	histStore, err := history.OpenFromEnvironment()
+	if err != nil {
+		return err
+	}
+
 	panels := tview.NewFlex().
 		SetDirection(tview.FlexColumn).
 		AddItem(left.list, 0, 1, true).
@@ -1936,12 +1969,27 @@ func run() error {
 		AddPage("main", root, true, true)
 
 	state := &appState{
-		app:      app,
-		pages:    pages,
-		panels:   [2]*panel{left, right},
-		status:   status,
-		cmdInput: cmdInput,
+		app:        app,
+		pages:      pages,
+		panels:     [2]*panel{left, right},
+		status:     status,
+		cmdInput:   cmdInput,
+		histStore:  histStore,
+		cmdHistory: histStore.Cursor(history.Command),
 	}
+	cmdInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModAlt != 0 && state.cmdHistory != nil {
+			switch strings.ToLower(string(event.Rune())) {
+			case "p":
+				cmdInput.SetText(state.cmdHistory.Prev(cmdInput.GetText()))
+				return nil
+			case "n":
+				cmdInput.SetText(state.cmdHistory.Next(cmdInput.GetText()))
+				return nil
+			}
+		}
+		return event
+	})
 
 	cmdInput.SetDoneFunc(func(key tcell.Key) {
 		switch key {
@@ -1965,7 +2013,11 @@ func run() error {
 	}
 
 	app.SetInputCapture(state.keyHandler)
-	return app.SetRoot(pages, true).SetFocus(left.list).Run()
+	runErr := app.SetRoot(pages, true).SetFocus(left.list).Run()
+	if err := histStore.Save(); err != nil && runErr == nil {
+		runErr = err
+	}
+	return runErr
 }
 
 func main() {
