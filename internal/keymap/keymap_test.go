@@ -29,6 +29,11 @@ func TestParseStringAndEventNormaliseCtrlAndShiftedFunctionKeys(t *testing.T) {
 	if control != expected {
 		t.Fatalf("Ctrl-O normalized to %+v, want %+v", control, expected)
 	}
+	control = FromEvent(tcell.NewEventKey(tcell.KeyCtrlBackslash, 0, tcell.ModCtrl))
+	expected, _ = Parse("Ctrl-\\")
+	if control != expected {
+		t.Fatalf("Ctrl-\\ normalized to %+v, want %+v", control, expected)
+	}
 }
 
 func TestRebindRefusesReservedAndMovesBindingWithinMode(t *testing.T) {

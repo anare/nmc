@@ -166,6 +166,18 @@ func (c *Cached) Link(ctx context.Context, target, link string) error {
 	return err
 }
 
+func (c *Cached) Reconnect(ctx context.Context) error {
+	reconnector, ok := c.fs.(interface{ Reconnect(context.Context) error })
+	if !ok {
+		return errors.New("filesystem does not support reconnect")
+	}
+	if err := reconnector.Reconnect(ctx); err != nil {
+		return err
+	}
+	c.Invalidate()
+	return nil
+}
+
 func (c *Cached) Join(elem ...string) string { return c.fs.Join(elem...) }
 func (c *Cached) Dir(name string) string     { return c.fs.Dir(name) }
 func (c *Cached) IsAbs(name string) bool     { return c.fs.IsAbs(name) }

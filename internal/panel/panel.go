@@ -227,6 +227,9 @@ func (p *Panel) Enter(ctx context.Context) (bool, error) {
 func (p *Panel) GoUp(ctx context.Context) error {
 	parent := p.FS.Dir(p.Cwd)
 	if parent == p.Cwd {
+		if p.prevFS != nil {
+			return p.DisconnectRemote()
+		}
 		return nil
 	}
 	return p.SetDir(ctx, parent, base(p.FS, p.Cwd))

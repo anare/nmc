@@ -20,6 +20,7 @@ import (
 	"github.com/anare/nmc/internal/keymap"
 	"github.com/anare/nmc/internal/panel"
 	"github.com/anare/nmc/internal/shell"
+	"github.com/anare/nmc/internal/sshfs"
 	"github.com/anare/nmc/internal/ui"
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/anare/nmc/internal/viewer"
@@ -61,6 +62,9 @@ type App struct {
 	shellVisible bool
 	findState    *findState
 	clipboard    *clipboard.Clipboard
+	hostHistory  *history.Cursor
+	remoteFS     []*sshfs.FS
+	dialRemote   func(context.Context, string, string, int) (*sshfs.FS, string, error)
 }
 
 func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
@@ -95,7 +99,9 @@ func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
 	if store, err := history.OpenFromEnvironment(); err == nil {
 		a.history = store
 		a.cmdHistory = store.Cursor(history.Command)
+		a.hostHistory = store.Cursor(history.Host)
 	}
+	a.dialRemote = a.dialSSHInteractive
 	return a, nil
 }
 
@@ -119,6 +125,9 @@ func (a *App) Run() error {
 		}
 		if a.clipboard != nil {
 			_ = a.clipboard.Close()
+		}
+		for _, fs := range a.remoteFS {
+			_ = fs.Close()
 		}
 	}()
 	for !a.quit {
@@ -459,6 +468,10 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 	a.status = ""
 	active := a.panels[a.active]
 	if event.Key() == tcell.KeyEnter && a.cmd.Empty() {
+		if entry, ok := active.Selected(); ok && entry.IsUp && active.FS.Name() != "" {
+			a.disconnectRemote()
+			return
+		}
 		handled, err := active.Enter(context.Background())
 		if err != nil {
 			a.status = err.Error()
@@ -517,6 +530,10 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 	case tcell.KeyEnd:
 		active.End()
 	case tcell.KeyEnter, tcell.KeyRight:
+		if entry, ok := active.Selected(); ok && entry.IsUp && active.FS.Name() != "" {
+			a.disconnectRemote()
+			return
+		}
 		handled, err := active.Enter(context.Background())
 		if err != nil {
 			a.status = err.Error()
@@ -526,7 +543,13 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 			a.status = ""
 		}
 	case tcell.KeyLeft:
-		if err := active.GoUp(context.Background()); err != nil {
+		var err error
+		if active.FS.Name() != "" && active.FS.Dir(active.Cwd) == active.Cwd {
+			a.disconnectRemote()
+		} else {
+			err = active.GoUp(context.Background())
+		}
+		if err != nil {
 			a.status = err.Error()
 		} else {
 			a.status = ""
@@ -568,7 +591,16 @@ func (a *App) dispatchPanelAction(action string) {
 	case "mark":
 		active.ToggleMark()
 	case "refresh":
-		if err := active.Reload(context.Background()); err != nil {
+		var err error
+		if active.FS.Name() != "" {
+			if reconnector, ok := active.FS.(interface{ Reconnect(context.Context) error }); ok {
+				err = a.reconnectRemote(active.FS.Name(), reconnector)
+			}
+		}
+		if err == nil {
+			err = active.Reload(context.Background())
+		}
+		if err != nil {
 			a.status = err.Error()
 		} else {
 			a.status = "Directory refreshed"
@@ -581,6 +613,8 @@ func (a *App) dispatchPanelAction(action string) {
 		a.promptFind()
 	case "git-history":
 		a.openGitHistory()
+	case "connect":
+		a.promptRemoteConnect()
 	case "menu":
 		a.openSettings()
 	case "help":
@@ -597,6 +631,117 @@ func (a *App) dispatchPanelAction(action string) {
 	default:
 		a.status = "Action is not available yet: " + action
 	}
+}
+
+func (a *App) promptRemoteConnect() {
+	if a.panels[a.active].FS.Name() != "" {
+		a.dialog = dialog.NewConfirm("Disconnect remote", []string{"Return this panel to its previous filesystem?"}, []string{"Disconnect", "Cancel"}, func(result dialog.Result) {
+			if result.OK() {
+				a.disconnectRemote()
+			}
+		})
+		return
+	}
+	initial := ""
+	if a.hostHistory != nil {
+		entries := a.hostHistory.Entries()
+		if len(entries) > 0 {
+			initial = entries[0]
+		}
+	}
+	a.dialog = dialog.NewComboInput("Connect to SSH", "Location: ", initial, a.hostHistory, func(result dialog.Result) {
+		if result.OK() {
+			a.connectRemote(result.Text)
+		}
+	})
+}
+
+func (a *App) connectRemote(location string) {
+	user, host, port, remotePath, err := sshfs.ParseLocation(location)
+	if err != nil {
+		a.dialog = dialog.NewMessage("Connect to SSH", []string{err.Error()}, true)
+		return
+	}
+	if a.history != nil {
+		a.history.Add(history.Host, location)
+		_ = a.history.Save()
+		a.hostHistory = a.history.Cursor(history.Host)
+	}
+	fs, output, err := a.dialRemote(context.Background(), user, host, port)
+	if err != nil {
+		lines := []string{sshfsTidyOutput(output, err)}
+		a.dialog = dialog.NewMessage("Connect to SSH", lines, true)
+		return
+	}
+	cached := vfs.NewCached(fs)
+	if err := a.panels[a.active].ConnectRemote(cached, remotePath); err != nil {
+		_ = fs.Close()
+		a.dialog = dialog.NewMessage("Connect to SSH", []string{err.Error()}, true)
+		return
+	}
+	a.remoteFS = append(a.remoteFS, fs)
+	if output != "" {
+		a.status = output
+	} else {
+		a.status = "Connected to " + fs.Name()
+	}
+}
+
+func sshfsTidyOutput(output string, err error) string {
+	if strings.TrimSpace(output) != "" {
+		return strings.TrimSpace(output)
+	}
+	return err.Error()
+}
+
+func (a *App) dialSSHInteractive(ctx context.Context, user, host string, port int) (*sshfs.FS, string, error) {
+	if err := a.screen.Suspend(); err != nil {
+		return nil, "", err
+	}
+	fmt.Fprintf(os.Stderr, "Connecting to %s; SSH may prompt for credentials.\n", host)
+	fs, output, err := sshfs.Dial(ctx, user, host, port)
+	resumeErr := a.screen.Resume()
+	if err != nil {
+		return nil, output, err
+	}
+	if resumeErr != nil {
+		_ = fs.Close()
+		return nil, output, resumeErr
+	}
+	return fs, output, nil
+}
+
+func (a *App) reconnectRemote(name string, reconnector interface{ Reconnect(context.Context) error }) error {
+	if err := a.screen.Suspend(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Reconnecting to %s.\n", name)
+	err := reconnector.Reconnect(context.Background())
+	resumeErr := a.screen.Resume()
+	return errors.Join(err, resumeErr)
+}
+
+func (a *App) disconnectRemote() {
+	panel := a.panels[a.active]
+	name := panel.FS.Name()
+	if err := panel.DisconnectRemote(); err != nil {
+		a.dialog = dialog.NewMessage("Disconnect remote", []string{err.Error()}, true)
+		return
+	}
+	for _, other := range a.panels {
+		if other.FS.Name() == name {
+			a.status = "Remote panel disconnected"
+			return
+		}
+	}
+	for index, fs := range a.remoteFS {
+		if fs.Name() == name {
+			_ = fs.Close()
+			a.remoteFS = append(a.remoteFS[:index], a.remoteFS[index+1:]...)
+			break
+		}
+	}
+	a.status = "Remote panel disconnected"
 }
 
 func (a *App) openSettings() {
@@ -816,6 +961,10 @@ func (a *App) commandLineOwns(event *tcell.EventKey) bool {
 
 func (a *App) runCommand(command string, interactive bool) {
 	a.cmd.SetText("")
+	if strings.HasPrefix(strings.TrimSpace(command), "cd sftp://") {
+		a.connectRemote(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(command), "cd ")))
+		return
+	}
 	if strings.HasPrefix(strings.TrimSpace(command), "cd ") || strings.TrimSpace(command) == "cd" {
 		target := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(command), "cd"))
 		if target == "" {

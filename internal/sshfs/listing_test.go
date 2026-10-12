@@ -40,11 +40,21 @@ func TestParseBSDListingAndSymlinkRecords(t *testing.T) {
 	if !entries[0].IsDir || entries[0].Mode.Perm() != 0o755 || entries[1].Mode.Perm() != 0o644 || !entries[2].IsLink {
 		t.Fatalf("BSD listing parsed incorrectly: %+v", entries)
 	}
-	if err := ParseSymlinkRecords("R\tlink\tpath with spaces\n", entries); err != nil {
+	if err := ParseSymlinkRecords("R\tlink\tpath with spaces\nD\tlink\n", entries); err != nil {
 		t.Fatal(err)
 	}
-	if entries[2].Target != "path with spaces" {
-		t.Fatalf("link target = %q", entries[2].Target)
+	if entries[2].Target != "path with spaces" || !entries[2].IsDir {
+		t.Fatalf("link metadata = %+v", entries[2])
+	}
+}
+
+func TestParseBrokenSymlinkRecord(t *testing.T) {
+	entries := []vfs.Entry{{Name: "dangling", IsLink: true}}
+	if err := ParseSymlinkRecords("R\tdangling\tmissing\nB\tdangling\n", entries); err != nil {
+		t.Fatal(err)
+	}
+	if !entries[0].Broken || entries[0].Target != "missing" {
+		t.Fatalf("broken link metadata = %+v", entries[0])
 	}
 }
 

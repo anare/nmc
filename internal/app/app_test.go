@@ -13,6 +13,7 @@ import (
 	"github.com/anare/nmc/internal/editor"
 	"github.com/anare/nmc/internal/git"
 	"github.com/anare/nmc/internal/keymap"
+	"github.com/anare/nmc/internal/sshfs"
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/anare/nmc/internal/viewer"
 	"github.com/gdamore/tcell/v2"
@@ -95,6 +96,51 @@ func TestHandleKeyMarkRefreshAndQuit(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyF10, 0, tcell.ModNone))
 	if !a.quit {
 		t.Fatal("F10 did not request quit")
+	}
+}
+
+func TestCtrlBackslashConnectsAndDisconnectsRemotePanel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	sshDir := t.TempDir()
+	script := `#!/bin/sh
+last=
+for arg do last=$arg; done
+case "$last" in
+  *"stat --version"*) printf gnu ;;
+  *"cd --"*) printf 'L\tregular file\t4\t1700000000\t81a4\t1\tnote.txt\n' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(sshDir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", sshDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, vfs.NewMemFS(""), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.dialRemote = sshfs.Dial
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlBackslash, 0, tcell.ModCtrl))
+	if a.dialog == nil || a.dialog.Input == nil {
+		t.Fatalf("connect binding did not open combo input: %#v", a.dialog)
+	}
+	a.dialog.Input.SetText("sftp://alice@example.test:2222/work")
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.dialog != nil || a.panels[0].FS.Name() != "ssh:example.test" || a.panels[0].Cwd != "/work" {
+		t.Fatalf("remote panel connection: dialog=%#v fs=%q cwd=%q status=%q", a.dialog, a.panels[0].FS.Name(), a.panels[0].Cwd, a.status)
+	}
+	if entries := a.panels[0].Entries; len(entries) != 2 || entries[1].Name != "note.txt" {
+		t.Fatalf("remote listing = %+v", entries)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlBackslash, 0, tcell.ModCtrl))
+	if a.dialog == nil || a.dialog.Title != "Disconnect remote" {
+		t.Fatalf("remote disconnect prompt = %#v", a.dialog)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.panels[0].FS.Name() != "" || a.panels[0].Cwd != "/" || len(a.remoteFS) != 0 {
+		t.Fatalf("remote panel did not disconnect: fs=%q cwd=%q remotes=%d", a.panels[0].FS.Name(), a.panels[0].Cwd, len(a.remoteFS))
 	}
 }
 

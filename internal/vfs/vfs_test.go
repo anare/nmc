@@ -78,6 +78,40 @@ func TestCachedFilesystemCachesSmallContentAndInvalidates(t *testing.T) {
 	}
 }
 
+func TestCachedFilesystemReconnectInvalidatesRemoteListings(t *testing.T) {
+	ctx := context.Background()
+	mem := NewMemFS("remote")
+	mem.PutFile("/before", nil, 0o644)
+	remote := &reconnectableFS{FS: mem}
+	cached := NewCached(remote)
+	if _, err := cached.List(ctx, "/"); err != nil {
+		t.Fatal(err)
+	}
+	mem.PutFile("/after", nil, 0o644)
+	if entries, err := cached.List(ctx, "/"); err != nil || len(entries) != 1 {
+		t.Fatalf("cached listing before reconnect = %+v err=%v", entries, err)
+	}
+	if err := cached.Reconnect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if remote.reconnects != 1 {
+		t.Fatalf("reconnect calls = %d", remote.reconnects)
+	}
+	if entries, err := cached.List(ctx, "/"); err != nil || len(entries) != 2 {
+		t.Fatalf("listing after reconnect = %+v err=%v", entries, err)
+	}
+}
+
+type reconnectableFS struct {
+	FS
+	reconnects int
+}
+
+func (fs *reconnectableFS) Reconnect(context.Context) error {
+	fs.reconnects++
+	return nil
+}
+
 func TestLocalFilesystemListsParentAndSymlinkMetadata(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

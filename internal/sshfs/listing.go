@@ -78,6 +78,9 @@ func ParseLSListing(output string) ([]vfs.Entry, error) {
 			return nil, fmt.Errorf("invalid timestamp on line %d: %w", lineNumber+1, err)
 		}
 		name := strings.TrimSpace(lineTail(line, 6))
+		if name == "." || name == ".." {
+			continue
+		}
 		entry := vfs.Entry{
 			Name: name, Size: size, ModTime: time.Unix(seconds, 0),
 			Mode: parsePermissions(fields[0]),
@@ -107,6 +110,18 @@ func ParseSymlinkRecords(output string, entries []vfs.Entry) error {
 			continue
 		}
 		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) >= 2 && fields[0] == "B" {
+			if index, ok := byName[fields[1]]; ok {
+				entries[index].Broken = true
+			}
+			continue
+		}
+		if len(fields) >= 2 && fields[0] == "D" {
+			if index, ok := byName[fields[1]]; ok {
+				entries[index].IsDir = true
+			}
+			continue
+		}
 		if len(fields) != 3 || fields[0] != "R" {
 			return fmt.Errorf("invalid symlink listing record on line %d", lineNumber+1)
 		}

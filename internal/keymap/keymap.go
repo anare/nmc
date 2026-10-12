@@ -113,7 +113,7 @@ func New() *Map {
 
 func FromEvent(event *tcell.EventKey) Binding {
 	binding := Binding{Key: event.Key(), Mod: event.Modifiers()}
-	if isCtrlKey(binding.Key) {
+	if isCtrlKey(binding.Key) || binding.Key == tcell.KeyCtrlBackslash {
 		binding.Mod &^= tcell.ModCtrl
 	}
 	binding.Key, binding.Mod = foldShiftedFKey(binding.Key, binding.Mod)
