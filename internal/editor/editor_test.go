@@ -65,6 +65,7 @@ func TestSaveWritesAtomicallyAndKeepsTabs(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	editor, err := Open(context.Background(), vfs.NewLocal(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -80,5 +81,49 @@ func TestSaveWritesAtomicallyAndKeepsTabs(t *testing.T) {
 	}
 	if string(got) != "target:\n\techo ok!\n" || editor.Changed {
 		t.Fatalf("saved contents = %q changed=%v", got, editor.Changed)
+	}
+}
+
+func TestSelectionCopyDeleteAndPasteAreSingleUndoSteps(t *testing.T) {
+	editor := FromBytes("notes.txt", []byte("one\ntwo\nthree"))
+	editor.X, editor.Y = 1, 0
+	editor.StartSelection()
+	editor.X, editor.Y = 2, 1
+	if got, ok := editor.Selection(); !ok || string(got) != "ne\ntw" {
+		t.Fatalf("selection=%q ok=%v", got, ok)
+	}
+	if !editor.DeleteSelection() || string(editor.Bytes()) != "oo\nthree" {
+		t.Fatalf("delete selection contents=%q", editor.Bytes())
+	}
+	if !editor.Undo() || string(editor.Bytes()) != "one\ntwo\nthree" {
+		t.Fatalf("undo selection delete contents=%q", editor.Bytes())
+	}
+	editor.X, editor.Y = 3, 0
+	editor.InsertBytes([]byte("A\r\nB"))
+	if got := string(editor.Bytes()); got != "oneA\nB\ntwo\nthree" {
+		t.Fatalf("pasted text=%q", got)
+	}
+	if !editor.Undo() || string(editor.Bytes()) != "one\ntwo\nthree" {
+		t.Fatalf("undo paste contents=%q", editor.Bytes())
+	}
+}
+
+func TestBinarySelectionAndPastePreserveAllByteValues(t *testing.T) {
+	data := []byte{0, 1, 0xff, '\n', 2, 3}
+	fs := vfs.NewMemFS("test")
+	fs.PutFile("/raw.bin", data, 0o644)
+	editor, err := OpenBinary(context.Background(), fs, "/raw.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	editor.StartSelection()
+	editor.X, editor.Y = 2, 0
+	selected, ok := editor.Selection()
+	if !ok || !bytes.Equal(selected, []byte{0, 1}) {
+		t.Fatalf("binary selection=%v ok=%v", selected, ok)
+	}
+	editor.InsertBytes([]byte{0xfe, '\n', 0xfd})
+	if got, want := editor.Bytes(), []byte{0xfe, '\n', 0xfd, 0xff, '\n', 2, 3}; !bytes.Equal(got, want) {
+		t.Fatalf("binary paste=%v want=%v", got, want)
 	}
 }

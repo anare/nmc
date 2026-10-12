@@ -30,6 +30,10 @@ type snapshot struct {
 	x, y  int
 }
 
+type Position struct {
+	X, Y int
+}
+
 type Editor struct {
 	FS             vfs.FS
 	Path           string
@@ -46,6 +50,8 @@ type Editor struct {
 	coalescing     bool
 	highlighted    [][]syntax.Span
 	highlightReady bool
+	selectionStart *Position
+	selectionEnd   *Position
 }
 
 func Open(ctx context.Context, fs vfs.FS, path string) (*Editor, error) {
@@ -313,6 +319,128 @@ func (e *Editor) Search(query string) bool {
 	return false
 }
 
+func (e *Editor) StartSelection() {
+	position := Position{X: e.X, Y: e.Y}
+	e.selectionStart = &position
+	e.selectionEnd = nil
+}
+
+func (e *Editor) EndSelection() {
+	if e.selectionStart == nil {
+		e.StartSelection()
+		return
+	}
+	position := Position{X: e.X, Y: e.Y}
+	e.selectionEnd = &position
+}
+
+func (e *Editor) Selection() ([]byte, bool) {
+	start, end, ok := e.selection()
+	if !ok {
+		return nil, false
+	}
+	var data []byte
+	for y := start.Y; y <= end.Y; y++ {
+		line := e.Lines[y]
+		from, to := 0, len(line)
+		if y == start.Y {
+			from = start.X
+		}
+		if y == end.Y {
+			to = end.X
+		}
+		if e.Binary {
+			for _, value := range line[from:to] {
+				data = append(data, byte(value))
+			}
+		} else {
+			data = append(data, string(line[from:to])...)
+		}
+		if y < end.Y {
+			data = append(data, '\n')
+		}
+	}
+	return data, true
+}
+
+func (e *Editor) DeleteSelection() bool {
+	before := e.snapshot()
+	if !e.deleteSelection() {
+		return false
+	}
+	e.record(before)
+	return true
+}
+
+func (e *Editor) deleteSelection() bool {
+	start, end, ok := e.selection()
+	if !ok {
+		return false
+	}
+	first := append([]rune(nil), e.Lines[start.Y][:start.X]...)
+	last := e.Lines[end.Y][end.X:]
+	combined := append(first, last...)
+	e.replace(start.Y, end.Y-start.Y+1, combined)
+	e.X, e.Y = start.X, start.Y
+	e.selectionStart, e.selectionEnd = nil, nil
+	return true
+}
+
+func (e *Editor) InsertBytes(data []byte) {
+	if len(data) == 0 && e.selectionStart == nil {
+		return
+	}
+	before := e.snapshot()
+	e.deleteSelection()
+	var inserted [][]rune
+	if e.Binary {
+		for _, line := range bytes.Split(data, []byte{'\n'}) {
+			runes := make([]rune, len(line))
+			for index, value := range line {
+				runes[index] = rune(value)
+			}
+			inserted = append(inserted, runes)
+		}
+	} else {
+		parts := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+		for _, part := range parts {
+			inserted = append(inserted, []rune(part))
+		}
+	}
+	if len(inserted) == 0 {
+		return
+	}
+	line := e.Lines[e.Y]
+	prefix := append([]rune(nil), line[:e.X]...)
+	suffix := append([]rune(nil), line[e.X:]...)
+	inserted[0] = append(prefix, inserted[0]...)
+	inserted[len(inserted)-1] = append(inserted[len(inserted)-1], suffix...)
+	e.replace(e.Y, 1, inserted...)
+	e.Y += len(inserted) - 1
+	e.X = len(inserted[len(inserted)-1]) - len(suffix)
+	e.selectionStart, e.selectionEnd = nil, nil
+	e.record(before)
+}
+
+func (e *Editor) selection() (Position, Position, bool) {
+	if e.selectionStart == nil {
+		return Position{}, Position{}, false
+	}
+	start := *e.selectionStart
+	end := Position{X: e.X, Y: e.Y}
+	if e.selectionEnd != nil {
+		end = *e.selectionEnd
+	}
+	start.Y = min(max(start.Y, 0), len(e.Lines)-1)
+	end.Y = min(max(end.Y, 0), len(e.Lines)-1)
+	start.X = min(max(start.X, 0), len(e.Lines[start.Y]))
+	end.X = min(max(end.X, 0), len(e.Lines[end.Y]))
+	if start.Y > end.Y || start.Y == end.Y && start.X > end.X {
+		start, end = end, start
+	}
+	return start, end, start != end
+}
+
 func (e *Editor) Save(ctx context.Context) error {
 	if e.FS == nil {
 		return errors.New("editor has no filesystem")
@@ -471,11 +599,47 @@ func (e *Editor) Draw(screen tcell.Screen, rect ui.Rect, theme ui.Theme) {
 		}
 		e.drawEditorLine(screen, rect.X+1+numberWidth, rect.Y+1+row, rect.W-numberWidth-2, left, lineIndex, theme)
 	}
+	e.drawSelection(screen, rect, numberWidth)
 	cursorRow := e.Y - e.Top
 	if cursorRow >= 0 && cursorRow < rows {
 		cell := e.displayColumn(e.Lines[e.Y], e.X) - e.Left
 		if cell >= 0 && cell < rect.W-numberWidth-2 {
 			screen.SetContent(rect.X+1+numberWidth+cell, rect.Y+1+cursorRow, ' ', nil, theme.Selection)
+		}
+	}
+}
+
+func (e *Editor) drawSelection(screen tcell.Screen, rect ui.Rect, numberWidth int) {
+	start, end, ok := e.selection()
+	if !ok {
+		return
+	}
+	for lineIndex := start.Y; lineIndex <= end.Y; lineIndex++ {
+		row := lineIndex - e.Top
+		if row < 0 || row >= rect.H-2 {
+			continue
+		}
+		from, to := 0, len(e.Lines[lineIndex])
+		if lineIndex == start.Y {
+			from = start.X
+		}
+		if lineIndex == end.Y {
+			to = end.X
+		}
+		firstCell := e.displayColumn(e.Lines[lineIndex], from)
+		lastCell := e.displayColumn(e.Lines[lineIndex], to)
+		for cell := firstCell; cell < lastCell; {
+			x := rect.X + 1 + numberWidth + cell - e.Left
+			if x >= rect.X+1+numberWidth && x < rect.Right()-1 {
+				y := rect.Y + 1 + row
+				r, combining, style, width := screen.GetContent(x, y)
+				if r != 0 {
+					screen.SetContent(x, y, r, combining, style.Reverse(true))
+				}
+				cell += max(1, width)
+			} else {
+				cell++
+			}
 		}
 	}
 }

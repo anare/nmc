@@ -9,9 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anare/nmc/internal/clipboard"
 	"github.com/anare/nmc/internal/dialog"
 	"github.com/anare/nmc/internal/editor"
 	"github.com/anare/nmc/internal/fileop"
+	"github.com/anare/nmc/internal/find"
 	"github.com/anare/nmc/internal/git"
 	"github.com/anare/nmc/internal/history"
 	"github.com/anare/nmc/internal/panel"
@@ -45,6 +47,11 @@ type App struct {
 	cmdHistory   *history.Cursor
 	job          *shell.Job
 	commandCtx   context.CancelFunc
+	session      *shell.Session
+	sessionCtx   context.CancelFunc
+	shellVisible bool
+	findState    *findState
+	clipboard    *clipboard.Clipboard
 }
 
 func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
@@ -62,7 +69,7 @@ func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
 	}
 	a := &App{
 		screen: screen, panels: [2]*panel.Panel{left, right}, theme: ui.DefaultTheme(),
-		cmd: dialog.NewTextInput(""), output: shell.NewBuffer(1 << 20),
+		cmd: dialog.NewTextInput(""), output: shell.NewBuffer(1 << 20), clipboard: clipboard.New(),
 	}
 	if store, err := history.OpenFromEnvironment(); err == nil {
 		a.history = store
@@ -83,6 +90,15 @@ func (a *App) Run() error {
 		if a.opCancel != nil {
 			a.opCancel()
 		}
+		if a.sessionCtx != nil {
+			a.sessionCtx()
+		}
+		if a.session != nil {
+			_ = a.session.Close()
+		}
+		if a.clipboard != nil {
+			_ = a.clipboard.Close()
+		}
 	}()
 	for !a.quit {
 		a.Draw()
@@ -101,6 +117,24 @@ func (a *App) Run() error {
 				a.finishOperation(update.result)
 			case commandFinished:
 				a.finishCommand(update.err)
+			case shellSessionFinished:
+				a.session = nil
+				a.shellVisible = false
+				if a.sessionCtx != nil {
+					a.sessionCtx()
+					a.sessionCtx = nil
+				}
+				a.status = "Shell session ended"
+			case shellOutputUpdate:
+			case findHitEvent:
+				if a.findState != nil {
+					a.findState.hits = append(a.findState.hits, update.hit)
+				}
+			case findDoneEvent:
+				if a.findState != nil {
+					a.findState.searching = false
+					a.findState.err = update.err
+				}
 			}
 		}
 	}
@@ -113,6 +147,16 @@ func (a *App) Draw() {
 	if width < minWidth || height < minHeight {
 		message := fmt.Sprintf("Terminal too small (%dx%d); need at least %dx%d", width, height, minWidth, minHeight)
 		ui.TextCenter(a.screen, 0, height/2, width, message, a.theme.Error)
+		a.screen.Show()
+		return
+	}
+	if a.shellVisible && a.session != nil {
+		a.drawShell(width, height)
+		a.screen.Show()
+		return
+	}
+	if a.findState != nil {
+		a.drawFind(width, height)
 		a.screen.Show()
 		return
 	}
@@ -170,7 +214,11 @@ func (a *App) Draw() {
 func (a *App) drawHints(height int) {
 	width, _ := a.screen.Size()
 	var hints [10]string
-	if a.editor != nil {
+	if a.shellVisible {
+		hints[9] = "Panels"
+	} else if a.findState != nil {
+		hints[2], hints[4], hints[6], hints[9] = "Open", "Panelise", "Find again", "Quit"
+	} else if a.editor != nil {
 		hints[1], hints[3], hints[4], hints[7] = "Save", "Delete line", "Search", "Quit"
 	} else if a.viewer != nil {
 		hints[1], hints[2], hints[3], hints[4], hints[6], hints[7] = "Wrap", "Quit", "Hex", "Copy", "Search", "Raw"
@@ -178,6 +226,115 @@ func (a *App) drawHints(height int) {
 		hints[2], hints[3], hints[4], hints[5], hints[6], hints[7], hints[9] = "View", "Copy", "Move", "Mkdir", "Delete", "Refresh", "Quit"
 	}
 	ui.DrawHintBar(a.screen, height-1, width, a.theme, hints)
+}
+
+func (a *App) drawShell(width, height int) {
+	_ = a.session.Resize(width, height-2)
+	lines := a.session.Output()
+	start := max(0, len(lines)-(height-2))
+	for row, line := range lines[start:] {
+		ui.TextPadded(a.screen, 0, row, width, stripANSI(line), a.theme.Panel)
+	}
+	ui.TextPadded(a.screen, 0, height-2, width, "Interactive shell — Ctrl-O returns to panels", a.theme.HintLabel)
+	a.drawHints(height)
+}
+
+func stripANSI(value string) string {
+	var result strings.Builder
+	escape := false
+	csi := false
+	for _, char := range value {
+		if escape {
+			if csi {
+				if char >= '@' && char <= '~' {
+					escape, csi = false, false
+				}
+				continue
+			}
+			if char == '[' {
+				csi = true
+				continue
+			}
+			escape = false
+			continue
+		}
+		if char == 0x1b {
+			escape = true
+			continue
+		}
+		if char == '\r' {
+			continue
+		}
+		result.WriteRune(char)
+	}
+	return result.String()
+}
+
+func (a *App) toggleShell() {
+	if a.session != nil {
+		a.shellVisible = !a.shellVisible
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.sessionCtx = cancel
+	session, err := shell.StartSession(ctx, shell.Default(), a.panels[a.active].Cwd, func() {
+		_ = a.screen.PostEvent(tcell.NewEventInterrupt(shellOutputUpdate{}))
+	})
+	if err != nil {
+		cancel()
+		a.sessionCtx = nil
+		a.dialog = dialog.NewMessage("Shell", []string{err.Error()}, true)
+		return
+	}
+	a.session = session
+	a.shellVisible = true
+	go func() {
+		_ = session.Wait()
+		_ = a.screen.PostEvent(tcell.NewEventInterrupt(shellSessionFinished{}))
+	}()
+}
+
+func (a *App) handleShellKey(event *tcell.EventKey) {
+	if event.Key() == tcell.KeyCtrlO {
+		a.shellVisible = false
+		return
+	}
+	var data []byte
+	switch event.Key() {
+	case tcell.KeyEnter:
+		data = []byte{'\r'}
+	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		data = []byte{0x7f}
+	case tcell.KeyTab:
+		data = []byte{'\t'}
+	case tcell.KeyUp:
+		data = []byte("\x1b[A")
+	case tcell.KeyDown:
+		data = []byte("\x1b[B")
+	case tcell.KeyRight:
+		data = []byte("\x1b[C")
+	case tcell.KeyLeft:
+		data = []byte("\x1b[D")
+	case tcell.KeyRune:
+		if event.Modifiers()&tcell.ModCtrl != 0 {
+			if event.Rune() >= 'a' && event.Rune() <= 'z' {
+				data = []byte{byte(event.Rune() - 'a' + 1)}
+			}
+		} else if event.Modifiers()&tcell.ModAlt != 0 {
+			data = append([]byte{0x1b}, []byte(string(event.Rune()))...)
+		} else {
+			data = []byte(string(event.Rune()))
+		}
+	case tcell.KeyCtrlC:
+		data = []byte{0x03}
+	case tcell.KeyCtrlD:
+		data = []byte{0x04}
+	case tcell.KeyCtrlZ:
+		data = []byte{0x1a}
+	}
+	if len(data) > 0 {
+		_, _ = a.session.Write(data)
+	}
 }
 
 func (a *App) HandleKey(event *tcell.EventKey) {
@@ -190,6 +347,14 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 				callback(result)
 			}
 		}
+		return
+	}
+	if a.shellVisible {
+		a.handleShellKey(event)
+		return
+	}
+	if a.findState != nil {
+		a.handleFindKey(event)
 		return
 	}
 	if a.viewer != nil {
@@ -259,6 +424,8 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		return
 	}
 	switch event.Key() {
+	case tcell.KeyCtrlO:
+		a.toggleShell()
 	case tcell.KeyCtrlX:
 		a.ctrlXPending = true
 		a.status = "Ctrl-X: s symbolic link, l hard link, e edit link"
@@ -334,6 +501,8 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 				a.editLink()
 			case 'g':
 				a.openGitHistory()
+			case 'f':
+				a.promptFind()
 			}
 		} else if event.Modifiers() == tcell.ModNone && event.Rune() >= ' ' {
 			a.cmd.HandleKey(event)
@@ -703,6 +872,10 @@ func (a *App) openEditor() {
 		a.status = "F4 requires a file"
 		return
 	}
+	if entry.IsLink {
+		a.editLink()
+		return
+	}
 	opened, err := editor.Open(context.Background(), p.FS, p.CurrentPath())
 	if errors.Is(err, editor.ErrBinary) {
 		path := p.CurrentPath()
@@ -761,6 +934,45 @@ func (a *App) handleEditorKey(event *tcell.EventKey) {
 		if event.Modifiers()&tcell.ModAlt != 0 && event.Rune() == 'n' {
 			e.LineNumber = !e.LineNumber
 			return
+		}
+		if event.Modifiers()&tcell.ModAlt != 0 {
+			switch event.Rune() {
+			case 'a':
+				e.StartSelection()
+				a.status = "Selection started"
+				return
+			case 's':
+				e.EndSelection()
+				a.status = "Selection ended"
+				return
+			case 'c', 'x':
+				data, ok := e.Selection()
+				if !ok || a.clipboard == nil {
+					a.status = "No selection"
+					return
+				}
+				if _, err := a.clipboard.Copy(data); err != nil {
+					a.dialog = dialog.NewMessage("Clipboard", []string{err.Error()}, true)
+					return
+				}
+				if event.Rune() == 'x' {
+					e.DeleteSelection()
+				}
+				a.status = "Copied to " + a.clipboard.Describe()
+				return
+			case 'v':
+				if a.clipboard == nil {
+					return
+				}
+				data, err := a.clipboard.Paste()
+				if err != nil {
+					a.dialog = dialog.NewMessage("Clipboard", []string{err.Error()}, true)
+					return
+				}
+				e.InsertBytes(data)
+				a.status = "Pasted"
+				return
+			}
 		}
 		e.HandleKey(event)
 	default:
@@ -852,6 +1064,147 @@ func (a *App) openGitHistory() {
 	})
 }
 
+type findState struct {
+	fs        vfs.FS
+	options   find.Options
+	hits      []find.Hit
+	selected  int
+	searching bool
+	cancel    context.CancelFunc
+	err       error
+}
+
+func (a *App) promptFind() {
+	p := a.panels[a.active]
+	a.dialog = dialog.NewInput("Find", "File name pattern: ", "*", func(pattern dialog.Result) {
+		if !pattern.OK() {
+			return
+		}
+		a.dialog = dialog.NewInput("Find", "Containing text (optional): ", "", func(content dialog.Result) {
+			if !content.OK() {
+				return
+			}
+			a.startFind(p.FS, find.Options{Root: p.Cwd, NamePattern: pattern.Text, Contains: content.Text})
+		})
+	})
+}
+
+func (a *App) startFind(fs vfs.FS, options find.Options) {
+	ctx, cancel := context.WithCancel(context.Background())
+	a.findState = &findState{fs: fs, options: options, searching: true, cancel: cancel}
+	go func() {
+		_, err := find.Search(ctx, fs, options, func(hit find.Hit) {
+			_ = a.screen.PostEvent(tcell.NewEventInterrupt(findHitEvent{hit: hit}))
+		})
+		_ = a.screen.PostEvent(tcell.NewEventInterrupt(findDoneEvent{err: err}))
+	}()
+}
+
+func (a *App) drawFind(width, height int) {
+	title := fmt.Sprintf("Find: %s", a.findState.options.NamePattern)
+	state := fmt.Sprintf("%d hits", len(a.findState.hits))
+	if a.findState.searching {
+		state += "  searching…"
+	}
+	if a.findState.err != nil && !errors.Is(a.findState.err, context.Canceled) {
+		state += "  " + a.findState.err.Error()
+	}
+	ui.TextPadded(a.screen, 0, 0, width, title, a.theme.Border)
+	ui.TextRight(a.screen, 0, 0, width, state, a.theme.HintLabel)
+	rows := height - 2
+	start := max(0, len(a.findState.hits)-rows)
+	for row, hit := range a.findState.hits[start:] {
+		label := hit.Path
+		if hit.Line > 0 {
+			label = fmt.Sprintf("%s:%d: %s", hit.Path, hit.Line, hit.Text)
+		}
+		style := a.theme.Panel
+		if row+start == a.findState.selected {
+			style = a.theme.Selection
+		}
+		ui.TextPadded(a.screen, 0, row+1, width, label, style)
+	}
+	if a.findState.err != nil && !errors.Is(a.findState.err, context.Canceled) {
+		ui.TextPadded(a.screen, 0, height-2, width, a.findState.err.Error(), a.theme.Error)
+	}
+	a.drawHints(height)
+}
+
+func (a *App) handleFindKey(event *tcell.EventKey) {
+	switch event.Key() {
+	case tcell.KeyUp:
+		a.findState.selected = max(0, a.findState.selected-1)
+	case tcell.KeyDown:
+		a.findState.selected = min(max(0, len(a.findState.hits)-1), a.findState.selected+1)
+	case tcell.KeyCtrlC:
+		if a.findState.cancel != nil {
+			a.findState.cancel()
+		}
+		a.findState.searching = false
+	case tcell.KeyF10:
+		a.closeFind()
+	case tcell.KeyF7:
+		a.closeFind()
+		a.promptFind()
+	case tcell.KeyF5:
+		a.panelizeFind()
+	case tcell.KeyF3, tcell.KeyEnter:
+		a.openFindHit()
+	case tcell.KeyRune:
+		if event.Modifiers() == tcell.ModNone && (event.Rune() == 'q' || event.Rune() == 'Q') {
+			a.closeFind()
+		}
+	}
+}
+
+func (a *App) openFindHit() {
+	if a.findState == nil || len(a.findState.hits) == 0 {
+		return
+	}
+	hit := a.findState.hits[min(a.findState.selected, len(a.findState.hits)-1)]
+	view, err := viewer.Open(context.Background(), a.findState.fs, a.findState.fs.Join(a.findState.options.Root, hit.Path))
+	if err != nil {
+		a.dialog = dialog.NewMessage("Find result", []string{err.Error()}, true)
+		return
+	}
+	if hit.Line > 0 {
+		view.Goto(hit.Line)
+	}
+	a.closeFind()
+	a.viewer = view
+}
+
+func (a *App) panelizeFind() {
+	state := a.findState
+	if state == nil {
+		return
+	}
+	seen := make(map[string]bool)
+	entries := make([]vfs.Entry, 0, len(state.hits))
+	for _, hit := range state.hits {
+		if seen[hit.Path] {
+			continue
+		}
+		seen[hit.Path] = true
+		entry, err := state.fs.Stat(context.Background(), state.fs.Join(state.options.Root, hit.Path))
+		if err != nil {
+			entry = vfs.Entry{Name: hit.Path, SizeUnknown: true}
+		}
+		entry.Name = hit.Path
+		entries = append(entries, entry)
+	}
+	panel := a.panels[a.active]
+	panel.Panelize(state.options.Root, entries)
+	a.closeFind()
+}
+
+func (a *App) closeFind() {
+	if a.findState != nil && a.findState.cancel != nil {
+		a.findState.cancel()
+	}
+	a.findState = nil
+}
+
 func (a *App) handleViewerKey(event *tcell.EventKey) {
 	switch event.Key() {
 	case tcell.KeyEscape, tcell.KeyF3, tcell.KeyF10:
@@ -941,3 +1294,7 @@ func (a *App) promptViewerGoto() {
 type operationProgress struct{ progress fileop.Progress }
 type operationFinished struct{ result fileop.Result }
 type commandFinished struct{ err error }
+type shellOutputUpdate struct{}
+type shellSessionFinished struct{}
+type findHitEvent struct{ hit find.Hit }
+type findDoneEvent struct{ err error }

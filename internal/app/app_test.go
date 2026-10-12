@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -400,6 +401,71 @@ func TestF3OnParentShowsLocalGitHistory(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyF3, 0, tcell.ModNone))
 	if a.dialog == nil || a.dialog.Title == "" || len(a.dialog.Items) == 0 {
 		t.Fatalf("F3 on parent did not open Git history: dialog=%#v status=%q", a.dialog, a.status)
+	}
+}
+
+func TestCtrlOTogglesPersistentInteractiveShellSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY sessions are Unix-only")
+	}
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlO, 0, tcell.ModCtrl))
+	if !a.shellVisible || a.session == nil {
+		t.Fatal("Ctrl-O did not create and show a shell session")
+	}
+	if _, err := a.session.Write([]byte("printf 'shell-marker\\n'\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(strings.Join(a.session.Output(), "\n"), "shell-marker") {
+		time.Sleep(time.Millisecond * 5)
+	}
+	if output := strings.Join(a.session.Output(), "\n"); !strings.Contains(output, "shell-marker") {
+		t.Fatalf("interactive shell output = %q", output)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlO, 0, tcell.ModCtrl))
+	if a.shellVisible || a.session == nil {
+		t.Fatal("Ctrl-O hid or terminated the session incorrectly")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlO, 0, tcell.ModCtrl))
+	if !a.shellVisible || a.session == nil {
+		t.Fatal("Ctrl-O did not restore the existing shell session")
+	}
+	_ = a.session.Close()
+}
+
+func TestEditorSelectionUsesFileClipboardForCopyCutAndPaste(t *testing.T) {
+	screen := newTestScreen(t, 80, 24)
+	fs := vfs.NewMemFS("test")
+	fs.PutFile("/note.txt", []byte("hello"), 0o644)
+	a, err := New(screen, fs, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF4, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModAlt))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 's', tcell.ModAlt))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModAlt))
+	data, err := a.clipboard.Paste()
+	if err != nil || string(data) != "he" {
+		t.Fatalf("copied selection=%q err=%v", data, err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModAlt))
+	if got := string(a.editor.Bytes()); got != "llo" {
+		t.Fatalf("after cut=%q", got)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'v', tcell.ModAlt))
+	if got := string(a.editor.Bytes()); got != "hello" {
+		t.Fatalf("after paste=%q", got)
+	}
+	if !a.editor.Undo() || string(a.editor.Bytes()) != "llo" {
+		t.Fatalf("undo paste=%q", a.editor.Bytes())
 	}
 }
 
