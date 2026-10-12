@@ -53,6 +53,7 @@ type App struct {
 	keyTest      bool
 	keyTestEsc   bool
 	keyTestText  string
+	keyCapture   *bindingCapture
 	job          *shell.Job
 	commandCtx   context.CancelFunc
 	session      *shell.Session
@@ -177,6 +178,11 @@ func (a *App) Draw() {
 	}
 	if a.keyTest {
 		a.drawKeyTester(width, height)
+		a.screen.Show()
+		return
+	}
+	if a.keyCapture != nil {
+		ui.TextCenter(a.screen, 0, height/2, width, "Press a key to bind; Esc cancels", a.theme.Selection)
 		a.screen.Show()
 		return
 	}
@@ -363,6 +369,10 @@ func (a *App) handleShellKey(event *tcell.EventKey) {
 }
 
 func (a *App) HandleKey(event *tcell.EventKey) {
+	if a.keyCapture != nil {
+		a.handleBindingCapture(event)
+		return
+	}
 	if a.keyTest {
 		a.handleKeyTester(event)
 		return
@@ -550,7 +560,7 @@ func (a *App) dispatchPanelAction(action string) {
 	case "menu":
 		a.openSettings()
 	case "help":
-		a.showShortcuts()
+		a.openShortcutList()
 	case "toggle-hidden":
 		a.toggleHidden()
 	case "sort-order":
@@ -575,7 +585,7 @@ func (a *App) openSettings() {
 		lineNumbers = "on"
 	}
 	items := []string{
-		"Show shortcuts",
+		"Shortcuts…",
 		"Key tester",
 		"Show hidden files: " + hidden,
 		"Sort order: " + sortLabel(a.panels[0].Opt.SortMode),
@@ -588,7 +598,7 @@ func (a *App) openSettings() {
 		}
 		switch result.Selected {
 		case 0:
-			a.showShortcuts()
+			a.openShortcutList()
 		case 1:
 			a.keyTest = true
 			a.keyTestText = "Press a key to see how the app receives it. Esc twice returns."
@@ -613,15 +623,7 @@ func (a *App) openSettings() {
 			}
 			a.openSettings()
 		case 5:
-			if a.configPath == "" {
-				a.status = "Cannot determine the settings file path"
-				return
-			}
-			if err := a.keys.Save(a.configPath); err != nil {
-				a.dialog = dialog.NewMessage("Save settings", []string{err.Error()}, true)
-			} else {
-				a.status = "Settings saved"
-			}
+			a.saveSettings()
 		}
 	})
 }
@@ -665,19 +667,87 @@ func (a *App) cycleSortOrder() {
 	}
 }
 
-func (a *App) showShortcuts() {
-	var lines []string
-	for _, mode := range []keymap.Mode{keymap.Panel, keymap.Viewer, keymap.Editor, keymap.Find} {
-		lines = append(lines, "["+string(mode)+"]")
-		for _, action := range keymap.Defaults {
-			if action.Mode != mode {
-				continue
-			}
-			bindings := a.keys.Bindings(mode, action.Name)
-			lines = append(lines, fmt.Sprintf("%-22s %s", action.Describe, strings.Join(bindings, ", ")))
-		}
+func (a *App) saveSettings() {
+	if err := a.persistSettings(); err != nil {
+		a.dialog = dialog.NewMessage("Save settings", []string{err.Error()}, true)
+		return
 	}
-	a.dialog = dialog.NewList("Shortcuts", lines)
+	a.status = "Settings saved"
+}
+
+func (a *App) persistSettings() error {
+	if a.configPath == "" {
+		return errors.New("cannot determine the settings file path")
+	}
+	return a.keys.Save(a.configPath)
+}
+
+func (a *App) openShortcutList() {
+	actions := append([]keymap.Action(nil), keymap.Defaults...)
+	items := make([]string, 0, len(actions))
+	for _, action := range actions {
+		bindings := a.keys.Bindings(action.Mode, action.Name)
+		items = append(items, fmt.Sprintf("%-7s %-22s %s", action.Mode, action.Describe, strings.Join(bindings, ", ")))
+	}
+	a.dialog = dialog.NewMenu("Shortcuts", items, func(result dialog.Result) {
+		if result.OK() && result.Selected < len(actions) {
+			a.openShortcutActions(actions[result.Selected])
+		}
+	})
+}
+
+func (a *App) openShortcutActions(action keymap.Action) {
+	items := []string{"Bind a key", "Unbind", "Restore defaults", "Cancel"}
+	a.dialog = dialog.NewMenu("Shortcut: "+action.Describe, items, func(result dialog.Result) {
+		if !result.OK() {
+			return
+		}
+		switch result.Selected {
+		case 0:
+			a.keyCapture = &bindingCapture{mode: action.Mode, action: action.Name}
+		case 1:
+			a.keys.Unbind(action.Mode, action.Name)
+			a.saveSettings()
+		case 2:
+			var bindings []keymap.Binding
+			for _, spelling := range action.Defaults {
+				binding, err := keymap.Parse(spelling)
+				if err != nil {
+					a.status = err.Error()
+					return
+				}
+				bindings = append(bindings, binding)
+			}
+			if err := a.keys.Rebind(action.Mode, action.Name, bindings...); err != nil {
+				a.dialog = dialog.NewMessage("Restore shortcut", []string{err.Error()}, true)
+				return
+			}
+			a.saveSettings()
+		}
+	})
+}
+
+func (a *App) handleBindingCapture(event *tcell.EventKey) {
+	capture := a.keyCapture
+	a.keyCapture = nil
+	if event.Key() == tcell.KeyEscape {
+		a.status = "Shortcut capture cancelled"
+		return
+	}
+	binding := keymap.FromEvent(event)
+	previous := a.keys.Owner(capture.mode, binding)
+	if err := a.keys.Rebind(capture.mode, capture.action, binding); err != nil {
+		a.dialog = dialog.NewMessage("Bind shortcut", []string{err.Error()}, true)
+		return
+	}
+	if previous != "" && previous != capture.action {
+		a.status = fmt.Sprintf("%s now uses %s; %s lost that key", capture.action, binding.String(), previous)
+	} else {
+		a.status = fmt.Sprintf("%s bound to %s", capture.action, binding.String())
+	}
+	if err := a.persistSettings(); err != nil {
+		a.dialog = dialog.NewMessage("Save settings", []string{err.Error()}, true)
+	}
 }
 
 func (a *App) handleKeyTester(event *tcell.EventKey) {
@@ -1275,6 +1345,11 @@ type findState struct {
 	searching bool
 	cancel    context.CancelFunc
 	err       error
+}
+
+type bindingCapture struct {
+	mode   keymap.Mode
+	action string
 }
 
 func (a *App) promptFind() {

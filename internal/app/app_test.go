@@ -188,6 +188,45 @@ func TestF2KeyTesterCapturesKeysAndRequiresTwoEscapes(t *testing.T) {
 	}
 }
 
+func TestShortcutEditorBindsPersistsAndRejectsReservedKeys(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF2, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.keyCapture == nil {
+		t.Fatal("shortcut menu did not begin key capture")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone))
+	if a.keyCapture != nil {
+		t.Fatal("key capture did not finish")
+	}
+	if action, ok := a.keys.Lookup(keymap.Panel, tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone)); !ok || action != "help" {
+		t.Fatalf("new binding resolves to %q, %v", action, ok)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".bcrc"))
+	if err != nil || !strings.Contains(string(data), "help = z") {
+		t.Fatalf("binding was not persisted: %q err=%v", data, err)
+	}
+	restarted, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action, ok := restarted.keys.Lookup(keymap.Panel, tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone)); !ok || action != "help" {
+		t.Fatalf("saved binding did not load: %q, %v", action, ok)
+	}
+	restarted.keyCapture = &bindingCapture{mode: keymap.Panel, action: "view"}
+	restarted.HandleKey(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone))
+	if restarted.dialog == nil || !strings.Contains(strings.Join(restarted.dialog.Lines, " "), "reserved") {
+		t.Fatal("shortcut capture did not reject reserved Tab")
+	}
+}
+
 // TestDrawReportsWhenTerminalIsTooSmall prevents unusable frames at sizes
 // below the minimum required by the panel layout.
 func TestDrawReportsWhenTerminalIsTooSmall(t *testing.T) {
