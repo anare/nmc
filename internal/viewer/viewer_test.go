@@ -66,6 +66,35 @@ func TestDrawShowsHexOffsetsAndHonoursWrapAndLineNumberSettings(t *testing.T) {
 	}
 }
 
+func TestWrappedTextPreservesHighlightedContent(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	screen.SetSize(16, 10)
+	view := FromBytes("main.go", []byte("package example\nfunc main() {}"))
+	if len(view.Highlights) == 0 {
+		t.Fatal("Go source did not receive syntax highlighting")
+	}
+	view.Draw(screen, ui.Rect{W: 16, H: 10}, ui.DefaultTheme())
+	var body strings.Builder
+	for y := 1; y < 9; y++ {
+		for x := 1; x < 15; x++ {
+			r, _, _, _ := screen.GetContent(x, y)
+			if r != 0 && r != ' ' {
+				body.WriteRune(r)
+			}
+		}
+	}
+	got := body.String()
+	for _, text := range []string{"packageexample", "funcmain"} {
+		if !strings.Contains(got, text) {
+			t.Fatalf("wrapped view omitted %q: %q", text, got)
+		}
+	}
+}
+
 func viewerScreenText(screen tcell.SimulationScreen) string {
 	width, height := screen.Size()
 	var b strings.Builder

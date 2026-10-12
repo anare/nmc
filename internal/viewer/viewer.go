@@ -15,6 +15,7 @@ import (
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/gdamore/tcell/v2"
 	"github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 )
 
 const SizeLimit = 32 << 20
@@ -223,14 +224,7 @@ func (v *Viewer) drawText(screen tcell.Screen, x, y, width, rows int, theme ui.T
 		}
 		line := v.Lines[lineIndex]
 		if v.Wrap {
-			wrapped := wrapDisplay(line, textWidth)
-			for _, part := range wrapped {
-				if drawn >= rows {
-					break
-				}
-				ui.Text(screen, x+numberWidth, y+drawn, textWidth, part, theme.Panel)
-				drawn++
-			}
+			drawn += v.drawWrappedLine(screen, x+numberWidth, y+drawn, textWidth, rows-drawn, lineIndex, theme)
 		} else {
 			text := line
 			if v.Left > 0 {
@@ -241,6 +235,64 @@ func (v *Viewer) drawText(screen tcell.Screen, x, y, width, rows int, theme ui.T
 		}
 		lineIndex++
 	}
+}
+
+func (v *Viewer) drawWrappedLine(screen tcell.Screen, x, y, width, rows, lineIndex int, theme ui.Theme) int {
+	type run struct {
+		text  string
+		style tcell.Style
+	}
+	spans := []syntax.Span{{Text: v.Lines[lineIndex]}}
+	if v.Mode == TextMode && lineIndex < len(v.Highlights) {
+		spans = v.Highlights[lineIndex]
+	}
+	if width <= 0 || rows <= 0 {
+		return 0
+	}
+	row, cells := 0, 0
+	runs := make([]run, 0, len(spans))
+	drawRuns := func() {
+		offset := 0
+		for _, part := range runs {
+			offset += ui.Text(screen, x+offset, y+row, width-offset, part.text, part.style)
+			if offset >= width {
+				break
+			}
+		}
+		runs = runs[:0]
+	}
+	for _, span := range spans {
+		style := theme.Panel
+		if v.Mode == TextMode {
+			if span.Foreground.IsSet() {
+				style = style.Foreground(tcell.NewRGBColor(int32(span.Foreground.Red()), int32(span.Foreground.Green()), int32(span.Foreground.Blue())))
+			}
+			if span.Bold {
+				style = style.Bold(true)
+			}
+		}
+		graphemes := uniseg.NewGraphemes(span.Text)
+		for graphemes.Next() {
+			cluster := graphemes.Str()
+			clusterWidth := max(0, graphemes.Width())
+			if cells+clusterWidth > width && cells > 0 {
+				drawRuns()
+				row++
+				if row >= rows {
+					return rows
+				}
+				cells = 0
+			}
+			if len(runs) > 0 && runs[len(runs)-1].style == style {
+				runs[len(runs)-1].text += cluster
+			} else {
+				runs = append(runs, run{text: cluster, style: style})
+			}
+			cells += clusterWidth
+		}
+	}
+	drawRuns()
+	return min(rows, row+1)
 }
 
 func (v *Viewer) drawLine(screen tcell.Screen, x, y, width, lineIndex int, line string, theme ui.Theme) {

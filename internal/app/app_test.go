@@ -175,13 +175,22 @@ func TestF5CopiesAndF8DeletesThroughFileOperationLayer(t *testing.T) {
 	if err != nil || string(data) != "copy me" {
 		t.Fatalf("copied file contents = %q, err=%v", data, err)
 	}
-
+	if _, err := fs.Stat(context.Background(), "/source.txt"); err != nil {
+		t.Fatalf("F5 copy unexpectedly removed source: %v", err)
+	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyF6, 0, tcell.ModNone))
+	if a.dialog == nil {
+		t.Fatal("F6 did not open a destination prompt")
+	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlK, 0, tcell.ModCtrl))
 	for _, r := range "/moved.txt" {
 		a.HandleKey(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
 	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.dialog == nil || a.dialog.Title != "Move" {
+		t.Fatalf("F6 did not start a move operation: dialog=%#v status=%q", a.dialog, a.status)
+	}
 	waitForOperation(t, a, screen)
 	if _, err := fs.Stat(context.Background(), "/source.txt"); err == nil {
 		t.Fatal("F6 did not remove the moved source")
@@ -190,6 +199,12 @@ func TestF5CopiesAndF8DeletesThroughFileOperationLayer(t *testing.T) {
 		t.Fatalf("F6 did not create the destination: %v", err)
 	}
 
+	for index, entry := range a.panels[0].Entries {
+		if entry.Name == "moved.txt" {
+			a.panels[0].MoveTo(index)
+			break
+		}
+	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyF8, 0, tcell.ModNone))
 	if a.dialog == nil {
 		t.Fatal("F8 did not ask for delete confirmation")
@@ -308,6 +323,9 @@ func waitForOperation(t *testing.T, a *App, screen tcell.SimulationScreen) {
 	select {
 	case finished := <-finishedEvents:
 		a.finishOperation(finished.result)
+		if err := finished.result.Err(); err != nil {
+			t.Fatalf("file operation failed: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for file operation")
 	}
