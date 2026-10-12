@@ -1324,31 +1324,38 @@ func (a *App) openGitHistory() {
 		return
 	}
 	type choice struct {
-		hash        string
-		uncommitted bool
+		action string
+		hash   string
 	}
-	choices := make([]choice, 0, len(commits)+1)
-	items := make([]string, 0, len(commits)+1)
+	choices := []choice{{action: "commit"}, {action: "branches"}}
+	items := []string{"Commit changes…", "Switch branch…"}
 	if len(status.Staged)+len(status.Modified)+len(status.Untracked) > 0 {
 		items = append(items, "* working tree — uncommitted changes")
-		choices = append(choices, choice{uncommitted: true})
+		choices = append(choices, choice{action: "diff"})
 	}
 	for _, commit := range commits {
 		items = append(items, fmt.Sprintf("%s  %s  %s", commit.Short, commit.When.Format("2006-01-02"), commit.Subject))
-		choices = append(choices, choice{hash: commit.Hash})
+		choices = append(choices, choice{action: "show", hash: commit.Hash})
 	}
-	if len(items) == 0 {
-		a.dialog = dialog.NewMessage("Git history", []string{"No commits or working-tree changes."}, false)
-		return
+	title := fmt.Sprintf("Git: %s — %s", path, git.Describe(ctx, root))
+	if len(commits) == 0 {
+		title = "Git: history is empty — " + path
 	}
-	title := fmt.Sprintf("History: %s — %s", path, git.Describe(ctx, root))
-	a.dialog = dialog.NewPicker(title, items, func(result dialog.Result) {
+	a.dialog = dialog.NewMenu(title, items, func(result dialog.Result) {
 		if !result.OK() || result.Selected < 0 || result.Selected >= len(choices) {
+			return
+		}
+		switch choices[result.Selected].action {
+		case "commit":
+			a.promptGitCommit(root)
+			return
+		case "branches":
+			a.showGitBranches(root)
 			return
 		}
 		var data []byte
 		var err error
-		if choices[result.Selected].uncommitted {
+		if choices[result.Selected].action == "diff" {
 			data, err = git.Diff(ctx, root, path)
 		} else {
 			data, err = git.Show(ctx, root, choices[result.Selected].hash, path)
@@ -1358,6 +1365,72 @@ func (a *App) openGitHistory() {
 			return
 		}
 		a.viewer = viewer.FromBytesAs(items[result.Selected], "commit.diff", data)
+	})
+}
+
+func (a *App) promptGitCommit(root string) {
+	a.dialog = dialog.NewConfirm("Commit changes", []string{"Choose whether to stage all changes before committing."}, []string{"Stage all", "Staged only", "Cancel"}, func(choice dialog.Result) {
+		if choice.Button < 0 || choice.Button > 1 {
+			return
+		}
+		stageAll := choice.Button == 0
+		a.dialog = dialog.NewInput("Commit", "Message: ", "", func(result dialog.Result) {
+			if !result.OK() {
+				return
+			}
+			hash, err := git.CommitChanges(context.Background(), root, result.Text, stageAll)
+			if err != nil {
+				a.dialog = dialog.NewMessage("Commit", []string{err.Error()}, true)
+				return
+			}
+			a.status = "Committed " + hash[:min(7, len(hash))]
+			a.openGitHistory()
+		})
+	})
+}
+
+func (a *App) showGitBranches(root string) {
+	branches, err := git.Branches(context.Background(), root)
+	if err != nil {
+		a.dialog = dialog.NewMessage("Branches", []string{err.Error()}, true)
+		return
+	}
+	if len(branches) == 0 {
+		a.dialog = dialog.NewMessage("Branches", []string{"No local branches."}, false)
+		return
+	}
+	current := git.Describe(context.Background(), root)
+	items := make([]string, len(branches))
+	for index, branch := range branches {
+		items[index] = branch.Name
+		if branch.Name == current {
+			items[index] = "* " + branch.Name
+		}
+	}
+	a.dialog = dialog.NewMenu("Switch branch", items, func(result dialog.Result) {
+		if !result.OK() || result.Selected < 0 || result.Selected >= len(branches) {
+			return
+		}
+		branch := branches[result.Selected].Name
+		if branch == current {
+			a.status = "Already on " + branch
+			return
+		}
+		a.dialog = dialog.NewConfirm("Switch branch", []string{"Switch to " + branch + "?"}, []string{"Switch", "Cancel"}, func(confirm dialog.Result) {
+			if !confirm.OK() {
+				return
+			}
+			if err := git.Switch(context.Background(), root, branch); err != nil {
+				a.dialog = dialog.NewMessage("Switch branch", []string{err.Error()}, true)
+				return
+			}
+			for _, panel := range a.panels {
+				if err := panel.Reload(context.Background()); err != nil {
+					a.status = err.Error()
+				}
+			}
+			a.status = "Switched to " + branch
+		})
 	})
 }
 

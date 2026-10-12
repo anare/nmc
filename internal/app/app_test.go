@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/anare/nmc/internal/editor"
+	"github.com/anare/nmc/internal/git"
 	"github.com/anare/nmc/internal/keymap"
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/anare/nmc/internal/viewer"
@@ -635,6 +636,101 @@ func TestF3OnParentShowsLocalGitHistory(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyF3, 0, tcell.ModNone))
 	if a.dialog == nil || a.dialog.Title == "" || len(a.dialog.Items) == 0 {
 		t.Fatalf("F3 on parent did not open Git history: dialog=%#v status=%q", a.dialog, a.status)
+	}
+}
+
+func TestGitHistoryCanCommitWithoutExistingCommits(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	run := func(args ...string) {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.name", "Test User")
+	run("config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewLocal(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.panels[0].MoveTo(0)
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF3, 0, tcell.ModNone))
+	if a.dialog == nil || !strings.Contains(a.dialog.Title, "history is empty") {
+		t.Fatalf("empty history menu = %#v", a.dialog)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.dialog == nil || a.dialog.Title != "Commit changes" {
+		t.Fatalf("commit selection dialog = %#v", a.dialog)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.dialog == nil || a.dialog.Input == nil {
+		t.Fatalf("commit message input = %#v", a.dialog)
+	}
+	a.dialog.Input.SetText("first commit")
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.dialog == nil || !strings.HasPrefix(a.dialog.Title, "Git:") {
+		t.Fatalf("history did not reopen after commit: %#v", a.dialog)
+	}
+	commits, err := git.Log(context.Background(), dir, "", 10)
+	if err != nil || len(commits) != 1 || commits[0].Subject != "first commit" {
+		t.Fatalf("commits=%+v err=%v", commits, err)
+	}
+}
+
+func TestGitHistoryCanSwitchBranchesAndReloadBothPanels(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	run := func(args ...string) {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.name", "Test User")
+	run("config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "note.txt")
+	run("commit", "-q", "-m", "initial")
+	run("branch", "feature")
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewLocal(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF3, 0, tcell.ModNone))
+	a.dialog.Selected = 1
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.dialog == nil || a.dialog.Title != "Switch branch" {
+		t.Fatalf("branch menu = %#v", a.dialog)
+	}
+	for index, item := range a.dialog.Items {
+		if strings.TrimPrefix(item, "* ") == "feature" {
+			a.dialog.Selected = index
+			break
+		}
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.dialog == nil || a.dialog.Title != "Switch branch" || a.dialog.Buttons[0] != "Switch" {
+		t.Fatalf("branch confirmation = %#v", a.dialog)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if branch := git.Describe(context.Background(), dir); branch != "feature" {
+		t.Fatalf("current branch = %q, want feature", branch)
+	}
+	if a.dialog != nil {
+		t.Fatalf("successful switch left dialog open: %#v", a.dialog)
 	}
 }
 
