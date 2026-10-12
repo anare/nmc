@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,66 @@ type Entry struct {
 	Target      string
 	Links       int
 	SizeUnknown bool
+}
+
+type SortMode int
+
+const (
+	SortByName SortMode = iota
+	SortByExt
+	SortBySize
+	SortByTime
+)
+
+type Options struct {
+	SortMode   SortMode
+	ShowHidden bool
+}
+
+func Sort(entries []Entry, mode SortMode) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		if a.IsUp != b.IsUp {
+			return a.IsUp
+		}
+		if a.IsDir != b.IsDir {
+			return a.IsDir
+		}
+		switch mode {
+		case SortByExt:
+			if a.Ext() != b.Ext() {
+				return a.Ext() < b.Ext()
+			}
+		case SortBySize:
+			if a.Size != b.Size {
+				return a.Size > b.Size
+			}
+		case SortByTime:
+			if !a.ModTime.Equal(b.ModTime) {
+				return a.ModTime.After(b.ModTime)
+			}
+		}
+		aName, bName := strings.ToLower(a.Name), strings.ToLower(b.Name)
+		if aName != bName {
+			return aName < bName
+		}
+		return a.Name < b.Name
+	})
+}
+
+func ParseSortMode(value string) (SortMode, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "name":
+		return SortByName, true
+	case "ext", "extension":
+		return SortByExt, true
+	case "size":
+		return SortBySize, true
+	case "time", "modify time":
+		return SortByTime, true
+	default:
+		return SortByName, false
+	}
 }
 
 type Class string
@@ -95,10 +156,10 @@ func (e Entry) Ext() string {
 
 func (e Entry) Indicator() string {
 	switch {
-	case e.IsDir:
-		return "/"
 	case e.IsLink:
 		return "@"
+	case e.IsDir:
+		return "/"
 	case e.IsExec():
 		return "*"
 	case e.IsSpecial():
@@ -156,12 +217,14 @@ func (e Entry) SizeString(width int) string {
 
 func (e Entry) Class() Class {
 	switch {
-	case e.IsUp, e.IsDir:
+	case e.IsUp:
 		return ClassDir
 	case e.Broken:
 		return ClassBroken
 	case e.IsLink:
 		return ClassLink
+	case e.IsDir:
+		return ClassDir
 	case e.IsSpecial():
 		return ClassSpecial
 	case e.IsExec():
