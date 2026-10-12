@@ -32,9 +32,12 @@ run_cached() {
 	local marker="$NMC_GATE_CACHE/$key.status"
 	local output="$NMC_GATE_CACHE/$key.output"
 	if [[ -f "$marker" ]]; then
+		if [[ $(<"$marker") == 0 ]]; then
+			printf 'cached check passed: %s\n' "$*"
+			return 0
+		fi
 		cat "$output"
-		[[ $(<"$marker") == 0 ]] || return 1
-		return
+		return 1
 	fi
 	local status=0
 	(cd "$NMC_ROOT" && "$@") >"$output" 2>&1 || status=$?

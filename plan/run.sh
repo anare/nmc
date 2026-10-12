@@ -17,11 +17,20 @@ if (($#)); then
 		elif [[ "$argument" =~ ^[0-9]+-[0-9]+$ ]]; then
 			start=${argument%-*}
 			end=${argument#*-}
+			if ((start < 1 || end > 16 || start > end)); then
+				printf 'invalid phase range: %s (expected 1-16)\n' "$argument" >&2
+				exit 2
+			fi
 			for ((phase=start; phase<=end; phase++)); do
 				phases+=("$(printf '%02d' "$phase")")
 			done
 		else
 			printf 'usage: %s [phase-number ... | start-end]\n' "$0" >&2
+			exit 2
+		fi
+		if ((${#phases[@]} > 0)) && [[ ${phases[-1]} =~ ^[0-9]+$ ]] &&
+			((10#${phases[-1]} < 1 || 10#${phases[-1]} > 16)); then
+			printf 'unknown phase: %s (expected 1-16)\n' "$argument" >&2
 			exit 2
 		fi
 	done

@@ -107,10 +107,9 @@ even though each phase asks for them. For example:
 ```bash
 need_file   internal/git/git.go
 need_grep   "func CurrentStatus" internal/git/git.go
-need_tests  ./internal/git 'TestCurrentStatus|TestCommitChanges' 10
+need_tests  ./internal/git 'TestEmptyRepositoryHasEmptyHistory|TestGitReadWriteWorkflow'
 need_build
 need_suite
-finish
 ```
 
 `run.sh` runs every gate **once per invocation** and caches the results —
