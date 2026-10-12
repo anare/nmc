@@ -267,6 +267,87 @@ func TestF3OpensViewerAndViewerSearchesThenCloses(t *testing.T) {
 	}
 }
 
+func TestViewerActionsUseViewerKeymap(t *testing.T) {
+	screen := newTestScreen(t, 80, 24)
+	fs := vfs.NewMemFS("test")
+	fs.PutFile("/readme.txt", []byte("alpha"), 0o644)
+	a, err := New(screen, fs, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF3, 0, tcell.ModNone))
+	initialWrap := a.viewer.Wrap
+	binding, err := keymap.Parse("Ctrl-W")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.keys.Rebind(keymap.Viewer, "viewer-wrap", binding); err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'w', tcell.ModNone))
+	if a.viewer.Wrap != initialWrap {
+		t.Fatal("old w binding still toggled wrapping")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlW, 0, tcell.ModCtrl))
+	if a.viewer.Wrap == initialWrap {
+		t.Fatal("rebound Ctrl-W did not toggle wrapping")
+	}
+}
+
+func TestFindActionsUseFindKeymap(t *testing.T) {
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.findState = &findState{}
+	binding, err := keymap.Parse("z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.keys.Rebind(keymap.Find, "find-quit", binding); err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone))
+	if a.findState == nil {
+		t.Fatal("old q binding still closed Find")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone))
+	if a.findState != nil {
+		t.Fatal("rebound z did not close Find")
+	}
+}
+
+func TestEditorActionsUseEditorKeymap(t *testing.T) {
+	screen := newTestScreen(t, 80, 24)
+	fs := vfs.NewMemFS("test")
+	fs.PutFile("/notes.txt", []byte("alpha"), 0o644)
+	a, err := New(screen, fs, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF4, 0, tcell.ModNone))
+	if a.editor == nil {
+		t.Fatal("F4 did not open editor")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModNone))
+	binding, err := keymap.Parse("Alt-U")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.keys.Rebind(keymap.Editor, "editor-undo", binding); err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyCtrlZ, 0, tcell.ModCtrl))
+	if got := string(a.editor.Bytes()); got != "xalpha" {
+		t.Fatalf("old Ctrl-Z binding still undid edit: %q", got)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'u', tcell.ModAlt))
+	if got := string(a.editor.Bytes()); got != "alpha" {
+		t.Fatalf("rebound Alt-U did not undo edit: %q", got)
+	}
+}
+
 func TestCommandRunsInBackgroundAndOutputCanBeViewed(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

@@ -361,14 +361,26 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		return
 	}
 	if a.findState != nil {
+		if action, ok := a.keys.Lookup(keymap.Find, event); ok {
+			a.dispatchFindAction(action)
+			return
+		}
 		a.handleFindKey(event)
 		return
 	}
 	if a.viewer != nil {
+		if action, ok := a.keys.Lookup(keymap.Viewer, event); ok {
+			a.dispatchViewerAction(action)
+			return
+		}
 		a.handleViewerKey(event)
 		return
 	}
 	if a.editor != nil {
+		if action, ok := a.keys.Lookup(keymap.Editor, event); ok {
+			a.dispatchEditorAction(action)
+			return
+		}
 		a.handleEditorKey(event)
 		return
 	}
@@ -910,13 +922,31 @@ func (a *App) openEditor() {
 func (a *App) handleEditorKey(event *tcell.EventKey) {
 	e := a.editor
 	switch event.Key() {
-	case tcell.KeyF2, tcell.KeyCtrlS:
+	case tcell.KeyEscape:
+		a.closeEditor()
+	default:
+		e.HandleKey(event)
+	}
+}
+
+func (a *App) dispatchEditorAction(action string) {
+	e := a.editor
+	switch action {
+	case "editor-save":
 		if err := e.Save(context.Background()); err != nil {
 			a.dialog = dialog.NewMessage("Save", []string{err.Error()}, true)
 		} else {
 			a.status = "Saved"
 		}
-	case tcell.KeyF5:
+	case "editor-quit":
+		a.closeEditor()
+	case "editor-search":
+		a.dialog = dialog.NewInput("Search", "Pattern: ", "", func(result dialog.Result) {
+			if result.OK() && result.Text != "" {
+				e.Search(result.Text)
+			}
+		})
+	case "editor-goto":
 		a.dialog = dialog.NewInput("Go to line", "Line: ", fmt.Sprint(e.Y+1), func(result dialog.Result) {
 			if result.OK() {
 				var line int
@@ -928,63 +958,47 @@ func (a *App) handleEditorKey(event *tcell.EventKey) {
 				e.X = min(e.X, len(e.Lines[e.Y]))
 			}
 		})
-	case tcell.KeyF7:
-		a.dialog = dialog.NewInput("Search", "Pattern: ", "", func(result dialog.Result) {
-			if result.OK() && result.Text != "" {
-				e.Search(result.Text)
-			}
-		})
-	case tcell.KeyF8:
+	case "editor-delete-line":
 		e.DeleteLine()
-	case tcell.KeyF10, tcell.KeyF3, tcell.KeyEscape:
-		a.closeEditor()
-	case tcell.KeyRune:
-		if event.Modifiers()&tcell.ModAlt != 0 && event.Rune() == 'n' {
-			e.LineNumber = !e.LineNumber
+	case "editor-undo":
+		e.Undo()
+	case "editor-redo":
+		e.Redo()
+	case "editor-line-numbers":
+		e.LineNumber = !e.LineNumber
+	case "editor-select-start":
+		e.StartSelection()
+		a.status = "Selection started"
+	case "editor-select-end":
+		e.EndSelection()
+		a.status = "Selection ended"
+	case "editor-copy", "editor-cut":
+		data, ok := e.Selection()
+		if !ok || a.clipboard == nil {
+			a.status = "No selection"
 			return
 		}
-		if event.Modifiers()&tcell.ModAlt != 0 {
-			switch event.Rune() {
-			case 'a':
-				e.StartSelection()
-				a.status = "Selection started"
-				return
-			case 's':
-				e.EndSelection()
-				a.status = "Selection ended"
-				return
-			case 'c', 'x':
-				data, ok := e.Selection()
-				if !ok || a.clipboard == nil {
-					a.status = "No selection"
-					return
-				}
-				if _, err := a.clipboard.Copy(data); err != nil {
-					a.dialog = dialog.NewMessage("Clipboard", []string{err.Error()}, true)
-					return
-				}
-				if event.Rune() == 'x' {
-					e.DeleteSelection()
-				}
-				a.status = "Copied to " + a.clipboard.Describe()
-				return
-			case 'v':
-				if a.clipboard == nil {
-					return
-				}
-				data, err := a.clipboard.Paste()
-				if err != nil {
-					a.dialog = dialog.NewMessage("Clipboard", []string{err.Error()}, true)
-					return
-				}
-				e.InsertBytes(data)
-				a.status = "Pasted"
-				return
-			}
+		if _, err := a.clipboard.Copy(data); err != nil {
+			a.dialog = dialog.NewMessage("Clipboard", []string{err.Error()}, true)
+			return
 		}
-		e.HandleKey(event)
+		if action == "editor-cut" {
+			e.DeleteSelection()
+		}
+		a.status = "Copied to " + a.clipboard.Describe()
+	case "editor-paste":
+		if a.clipboard == nil {
+			return
+		}
+		data, err := a.clipboard.Paste()
+		if err != nil {
+			a.dialog = dialog.NewMessage("Clipboard", []string{err.Error()}, true)
+			return
+		}
+		e.InsertBytes(data)
+		a.status = "Pasted"
 	default:
-		e.HandleKey(event)
+		a.status = "Action is not available yet: " + action
 	}
 }
 
@@ -1144,24 +1158,27 @@ func (a *App) handleFindKey(event *tcell.EventKey) {
 		a.findState.selected = max(0, a.findState.selected-1)
 	case tcell.KeyDown:
 		a.findState.selected = min(max(0, len(a.findState.hits)-1), a.findState.selected+1)
-	case tcell.KeyCtrlC:
+	}
+}
+
+func (a *App) dispatchFindAction(action string) {
+	switch action {
+	case "find-open":
+		a.openFindHit()
+	case "find-panelise":
+		a.panelizeFind()
+	case "find-again":
+		a.closeFind()
+		a.promptFind()
+	case "find-stop":
 		if a.findState.cancel != nil {
 			a.findState.cancel()
 		}
 		a.findState.searching = false
-	case tcell.KeyF10:
+	case "find-quit":
 		a.closeFind()
-	case tcell.KeyF7:
-		a.closeFind()
-		a.promptFind()
-	case tcell.KeyF5:
-		a.panelizeFind()
-	case tcell.KeyF3, tcell.KeyEnter:
-		a.openFindHit()
-	case tcell.KeyRune:
-		if event.Modifiers() == tcell.ModNone && (event.Rune() == 'q' || event.Rune() == 'Q') {
-			a.closeFind()
-		}
+	default:
+		a.status = "Action is not available yet: " + action
 	}
 }
 
@@ -1215,18 +1232,8 @@ func (a *App) closeFind() {
 
 func (a *App) handleViewerKey(event *tcell.EventKey) {
 	switch event.Key() {
-	case tcell.KeyEscape, tcell.KeyF3, tcell.KeyF10:
+	case tcell.KeyEscape:
 		a.viewer = nil
-	case tcell.KeyF2:
-		a.viewer.Wrap = !a.viewer.Wrap
-	case tcell.KeyF4:
-		a.viewer.ToggleHex()
-	case tcell.KeyF8:
-		a.viewer.ToggleRaw()
-	case tcell.KeyF5:
-		a.promptViewerGoto()
-	case tcell.KeyF7:
-		a.promptViewerSearch()
 	case tcell.KeyUp:
 		a.viewer.Top = max(0, a.viewer.Top-1)
 	case tcell.KeyDown:
@@ -1243,36 +1250,39 @@ func (a *App) handleViewerKey(event *tcell.EventKey) {
 		} else {
 			a.viewer.Top = max(0, len(a.viewer.Lines)-1)
 		}
-	case tcell.KeyRune:
-		if event.Modifiers() == tcell.ModNone {
-			switch event.Rune() {
-			case 'q':
-				a.viewer = nil
-			case 'w':
-				a.viewer.Wrap = !a.viewer.Wrap
-			case 'h':
-				a.viewer.ToggleHex()
-			case 'r':
-				a.viewer.ToggleRaw()
-			case 'n':
-				a.viewer.NextHit(false)
-			case 'N':
-				a.viewer.NextHit(true)
-			case 'g':
-				a.viewer.Goto(1)
-			case 'G':
-				if a.viewer.Mode == viewer.HexMode {
-					a.viewer.Top = max(0, (len(a.viewer.Data)-1)/16)
-				} else {
-					a.viewer.Top = max(0, len(a.viewer.Lines)-1)
-				}
-			case '/':
-				a.promptViewerSearch()
-			}
-		}
 	}
-	if event.Modifiers()&tcell.ModAlt != 0 && event.Rune() == 'n' {
+}
+
+func (a *App) dispatchViewerAction(action string) {
+	switch action {
+	case "viewer-quit":
+		a.viewer = nil
+	case "viewer-wrap":
+		a.viewer.Wrap = !a.viewer.Wrap
+	case "viewer-hex":
+		a.viewer.ToggleHex()
+	case "viewer-raw":
+		a.viewer.ToggleRaw()
+	case "viewer-goto":
+		a.promptViewerGoto()
+	case "viewer-search":
+		a.promptViewerSearch()
+	case "viewer-search-next":
+		a.viewer.NextHit(false)
+	case "viewer-search-prev":
+		a.viewer.NextHit(true)
+	case "viewer-line-numbers":
 		a.viewer.LineNumber = !a.viewer.LineNumber
+	case "viewer-top":
+		a.viewer.Goto(1)
+	case "viewer-bottom":
+		if a.viewer.Mode == viewer.HexMode {
+			a.viewer.Top = max(0, (len(a.viewer.Data)-1)/16)
+		} else {
+			a.viewer.Top = max(0, len(a.viewer.Lines)-1)
+		}
+	default:
+		a.status = "Action is not available yet: " + action
 	}
 }
 

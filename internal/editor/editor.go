@@ -508,10 +508,6 @@ func (e *Editor) HandleKey(event *tcell.EventKey) bool {
 	case tcell.KeyTab:
 		e.coalescing = false
 		e.InsertRune('\t')
-	case tcell.KeyCtrlZ:
-		e.Undo()
-	case tcell.KeyCtrlY:
-		e.Redo()
 	case tcell.KeyCtrlB:
 		e.coalescing = false
 		e.word(-1)
