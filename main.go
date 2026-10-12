@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/anare/nmc/internal/fileop"
+	"github.com/anare/nmc/internal/history"
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
@@ -478,6 +479,8 @@ type appState struct {
 	termOSC    bool
 	termOSCEsc bool
 	cmdInput   *tview.InputField
+	histStore  *history.Store
+	cmdHistory *history.Cursor
 }
 
 func (s *appState) setStatus(msg string) {
@@ -491,6 +494,10 @@ func (s *appState) executeCommandLine() {
 	raw := s.cmdInput.GetText()
 	if strings.TrimSpace(raw) == "" {
 		return
+	}
+	if s.histStore != nil {
+		s.histStore.Add(history.Command, raw)
+		s.cmdHistory = s.histStore.Cursor(history.Command)
 	}
 	s.cmdInput.SetText("")
 	w := s.currentShellWriter()
@@ -1942,6 +1949,11 @@ func run() error {
 	cmdInput.SetTitle(" Command line ")
 	cmdInput.SetBorderColor(mcAccentMuted)
 
+	histStore, err := history.OpenFromEnvironment()
+	if err != nil {
+		return err
+	}
+
 	panels := tview.NewFlex().
 		SetDirection(tview.FlexColumn).
 		AddItem(left.list, 0, 1, true).
@@ -1957,12 +1969,27 @@ func run() error {
 		AddPage("main", root, true, true)
 
 	state := &appState{
-		app:      app,
-		pages:    pages,
-		panels:   [2]*panel{left, right},
-		status:   status,
-		cmdInput: cmdInput,
+		app:        app,
+		pages:      pages,
+		panels:     [2]*panel{left, right},
+		status:     status,
+		cmdInput:   cmdInput,
+		histStore:  histStore,
+		cmdHistory: histStore.Cursor(history.Command),
 	}
+	cmdInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModAlt != 0 && state.cmdHistory != nil {
+			switch strings.ToLower(string(event.Rune())) {
+			case "p":
+				cmdInput.SetText(state.cmdHistory.Prev(cmdInput.GetText()))
+				return nil
+			case "n":
+				cmdInput.SetText(state.cmdHistory.Next(cmdInput.GetText()))
+				return nil
+			}
+		}
+		return event
+	})
 
 	cmdInput.SetDoneFunc(func(key tcell.Key) {
 		switch key {
@@ -1986,7 +2013,11 @@ func run() error {
 	}
 
 	app.SetInputCapture(state.keyHandler)
-	return app.SetRoot(pages, true).SetFocus(left.list).Run()
+	runErr := app.SetRoot(pages, true).SetFocus(left.list).Run()
+	if err := histStore.Save(); err != nil && runErr == nil {
+		runErr = err
+	}
+	return runErr
 }
 
 func main() {
