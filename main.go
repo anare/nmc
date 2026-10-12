@@ -1886,7 +1886,6 @@ func run() error {
 	tview.Styles.BorderColor = mcAccent
 	tview.Styles.TitleColor = tcell.ColorWhite
 	tview.Styles.GraphicsColor = mcAccent
-	tview.Styles.PrimaryTextColor = tcell.ColorWhite
 	tview.Styles.SecondaryTextColor = tcell.ColorLightCyan
 
 	left := newPanel("Left")
