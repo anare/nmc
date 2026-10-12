@@ -277,11 +277,11 @@ func (a *App) Draw() {
 		if a.status == "" {
 			a.status = a.panels[a.active].Err.Error()
 		}
-		if a.quickSearching {
-			a.status = "Quick search: " + a.quickQuery
-			if a.quickQuery != "" && !a.quickMatch {
-				a.status += " (no match)"
-			}
+	}
+	if a.quickSearching {
+		a.status = "Quick search: " + a.quickQuery
+		if a.quickQuery != "" && !a.quickMatch {
+			a.status += " (no match)"
 		}
 	}
 	ui.TextPadded(a.screen, 0, height-2, width, strings.TrimSpace(a.status), statusStyle)
@@ -1132,8 +1132,8 @@ func (a *App) handleQuickSearchKey(event *tcell.EventKey, active *panel.Panel) b
 }
 
 func (a *App) findQuickSearchMatch(active *panel.Panel) {
-	a.quickMatch = false
-	if a.quickQuery == "" || len(active.Entries) == 0 {
+	a.quickMatch = a.quickQuery == ""
+	if a.quickMatch || len(active.Entries) == 0 {
 		return
 	}
 	needle := strings.ToLower(a.quickQuery)

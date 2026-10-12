@@ -102,6 +102,15 @@ func TestPanelKeymapSwapsPanelsAndQuickSearchSelectsEntries(t *testing.T) {
 	if selected, _ := a.panels[0].Selected(); selected.Name != "bravo" {
 		t.Fatalf("quick-search selected %q, want bravo", selected.Name)
 	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone))
+	a.Draw()
+	if !strings.Contains(screenText(a.screen), "(no match)") {
+		t.Fatal("quick-search did not show its no-match status")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModNone))
+	if a.quickQuery != "b" || !a.quickMatch {
+		t.Fatalf("backspace did not restore the matching prefix: query=%q match=%v", a.quickQuery, a.quickMatch)
+	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
 	if a.quickSearching {
 		t.Fatal("Escape did not leave quick search")

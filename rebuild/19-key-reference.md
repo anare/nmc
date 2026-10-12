@@ -99,6 +99,8 @@ all defaults, `F2`/`Esc`/`q` save and leave.
 
 **Key tester** — every key is recorded; `Esc Esc` leaves.
 
+**History browser** — `Ctrl-D` forgets the selected command.
+
 ## Prefixes
 
 | | |
