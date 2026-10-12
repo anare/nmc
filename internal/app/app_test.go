@@ -1,6 +1,7 @@
 package app
 
 import (
+	"archive/zip"
 	"context"
 	"os"
 	"os/exec"
@@ -488,6 +489,66 @@ extract = mkdir -p "$DEST/nested"; printf contents > "$DEST/$ENTRY"
 	}
 	if entry, ok := panel.Selected(); !ok || entry.Name != filepath.Base(archivePath) {
 		t.Fatalf("return selection = %#v", entry)
+	}
+}
+
+func TestF5CopiesARealZipMemberOutOfArchive(t *testing.T) {
+	if _, err := exec.LookPath("unzip"); err != nil {
+		t.Skip("unzip is not installed")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	archivePath := filepath.Join(root, "sample.zip")
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	member, err := writer.Create("nested/readme.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := member.Write([]byte("copied from archive")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "destination")
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, vfs.NewLocal(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, archive := range a.archiveFS {
+			_ = archive.Close()
+		}
+	})
+	if err := a.panels[1].SetDir(context.Background(), destination, ""); err != nil {
+		t.Fatal(err)
+	}
+	selectLocalFile(t, a.panels[0], filepath.Base(archivePath))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	selectLocalFile(t, a.panels[0], "nested")
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	selectLocalFile(t, a.panels[0], "readme.txt")
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF5, 0, tcell.ModNone))
+	if a.dialog == nil {
+		t.Fatal("F5 did not request the copy destination")
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	waitForOperation(t, a, screen)
+	data, err := os.ReadFile(filepath.Join(destination, "readme.txt"))
+	if err != nil || string(data) != "copied from archive" {
+		t.Fatalf("copied archive member=%q err=%v status=%q", data, err, a.status)
 	}
 }
 
