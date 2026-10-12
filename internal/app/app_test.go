@@ -82,7 +82,8 @@ func TestHandleKeySwitchesPanelsAndNavigatesDirectories(t *testing.T) {
 func TestPanelKeymapSwapsPanelsAndQuickSearchSelectsEntries(t *testing.T) {
 	fs := vfs.NewMemFS("test")
 	fs.Put("/", []vfs.Entry{{Name: "alpha"}, {Name: "beta"}, {Name: "bravo"}})
-	a, err := New(newTestScreen(t, 80, 24), fs, "/")
+	screen := newTestScreen(t, 80, 24)
+	a, err := New(screen, fs, "/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +105,7 @@ func TestPanelKeymapSwapsPanelsAndQuickSearchSelectsEntries(t *testing.T) {
 	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, 'z', tcell.ModNone))
 	a.Draw()
-	if !strings.Contains(screenText(a.screen), "(no match)") {
+	if !strings.Contains(screenText(screen), "(no match)") {
 		t.Fatal("quick-search did not show its no-match status")
 	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModNone))
