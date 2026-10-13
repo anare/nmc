@@ -20,6 +20,7 @@ import (
 	"github.com/anare/nmc/internal/keymap"
 	"github.com/anare/nmc/internal/panel"
 	"github.com/anare/nmc/internal/sshfs"
+	"github.com/anare/nmc/internal/ui"
 	"github.com/anare/nmc/internal/vfs"
 	"github.com/anare/nmc/internal/viewer"
 	"github.com/gdamore/tcell/v2"
@@ -364,7 +365,7 @@ func TestF2SettingsPersistHiddenFilePreference(t *testing.T) {
 	if a.panels[0].Opt.ShowHidden {
 		t.Fatal("settings menu did not turn hidden files off")
 	}
-	for range 6 {
+	for range 7 {
 		a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
 	}
 	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
@@ -385,6 +386,43 @@ func TestF2SettingsPersistHiddenFilePreference(t *testing.T) {
 		if entry.Name == ".hidden" {
 			t.Fatal("hidden file remained visible after restart")
 		}
+	}
+}
+
+func TestThemeSelectionUsesMidnightCommanderByDefaultAndPersists(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.theme.Name != ui.ThemeMidnightCommander {
+		t.Fatalf("default theme = %q, want Midnight Commander", a.theme.Name)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF2, 0, tcell.ModNone))
+	for range 6 {
+		a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.dialog == nil || a.dialog.Title != "Color theme" {
+		t.Fatalf("theme picker = %#v", a.dialog)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if a.theme.Name != ui.ThemeDark || a.keys.Settings()["theme"] != ui.ThemeDark {
+		t.Fatalf("selected theme=%q setting=%q", a.theme.Name, a.keys.Settings()["theme"])
+	}
+	for range 7 {
+		a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+
+	restarted, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.theme.Name != ui.ThemeDark {
+		t.Fatalf("restarted theme = %q, want %q", restarted.theme.Name, ui.ThemeDark)
 	}
 }
 

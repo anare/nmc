@@ -237,6 +237,7 @@ func displayWidth(str string) int {
 }
 
 type Theme struct {
+	Name       string
 	Background tcell.Style
 	Panel      tcell.Style
 	Border     tcell.Style
@@ -259,38 +260,6 @@ type Theme struct {
 	Data       tcell.Style
 	Temporary  tcell.Style
 	Plain      tcell.Style
-}
-
-func DefaultTheme() Theme {
-	background := tcell.NewRGBColor(0, 0, 96)
-	panel := tcell.NewRGBColor(0, 0, 128)
-	cyan := tcell.NewRGBColor(0, 170, 255)
-	base := func(color tcell.Color) tcell.Style { return tcell.StyleDefault.Foreground(color).Background(panel) }
-	bold := func(color tcell.Color) tcell.Style { return base(color).Bold(true) }
-	return Theme{
-		Background: tcell.StyleDefault.Background(background).Foreground(tcell.ColorWhite),
-		Panel:      tcell.StyleDefault.Background(panel).Foreground(tcell.ColorWhite),
-		Border:     base(cyan),
-		Dialog:     tcell.StyleDefault.Background(tcell.NewRGBColor(0, 0, 84)).Foreground(tcell.ColorWhite),
-		Error:      tcell.StyleDefault.Background(tcell.ColorRed).Foreground(tcell.ColorWhite).Bold(true),
-		Selection:  tcell.StyleDefault.Background(cyan).Foreground(tcell.ColorBlack),
-		Marked:     base(tcell.ColorYellow).Bold(true),
-		HintKey:    base(tcell.ColorYellow).Bold(true),
-		HintLabel:  base(tcell.ColorWhite),
-		Directory:  bold(tcell.ColorWhite),
-		Executable: bold(tcell.ColorGreen),
-		Symlink:    base(tcell.ColorAqua),
-		BrokenLink: bold(tcell.ColorRed),
-		Special:    base(tcell.NewRGBColor(128, 128, 0)),
-		Archive:    base(tcell.ColorFuchsia),
-		Image:      base(tcell.NewRGBColor(147, 112, 219)),
-		Media:      base(tcell.NewRGBColor(255, 140, 0)),
-		Source:     base(tcell.NewRGBColor(135, 206, 250)),
-		Document:   base(tcell.NewRGBColor(210, 180, 140)),
-		Data:       base(tcell.NewRGBColor(240, 230, 140)),
-		Temporary:  base(tcell.NewRGBColor(128, 128, 128)),
-		Plain:      base(tcell.ColorSilver),
-	}
 }
 
 func (t Theme) FileTypeStyle(entry vfs.Entry) tcell.Style {

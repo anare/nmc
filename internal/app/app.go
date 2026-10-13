@@ -109,6 +109,9 @@ func New(screen tcell.Screen, fs vfs.FS, cwd string) (*App, error) {
 		handlerSet:  handlers.DefaultSet(),
 		lineNumbers: strings.EqualFold(settings["line-numbers"], "on"),
 	}
+	if theme, ok := ui.ThemeByName(settings["theme"]); ok {
+		a.theme = theme
+	}
 	if home, err := os.UserHomeDir(); err == nil {
 		a.handlerPath = filepath.Join(home, ".bchandlers")
 		a.reloadHandlers()
@@ -838,6 +841,7 @@ func (a *App) openSettings() {
 		"Show hidden files: " + hidden,
 		"Sort order: " + sortLabel(a.panels[0].Opt.SortMode),
 		"Line numbers: " + lineNumbers,
+		"Theme: " + ui.ThemeLabel(a.theme.Name),
 		"Save all settings",
 	}
 	a.dialog = dialog.NewMenu("Settings", items, func(result dialog.Result) {
@@ -873,9 +877,36 @@ func (a *App) openSettings() {
 			}
 			a.openSettings()
 		case 6:
+			a.openThemePicker()
+		case 7:
 			a.saveSettings()
 		}
 	})
+}
+
+func (a *App) openThemePicker() {
+	names := ui.ThemeNames()
+	labels := make([]string, len(names))
+	selected := 0
+	for index, name := range names {
+		labels[index] = ui.ThemeLabel(name)
+		if name == a.theme.Name {
+			selected = index
+		}
+	}
+	a.dialog = dialog.NewMenu("Color theme", labels, func(result dialog.Result) {
+		if !result.OK() || result.Selected < 0 || result.Selected >= len(names) {
+			return
+		}
+		theme, ok := ui.ThemeByName(names[result.Selected])
+		if !ok {
+			return
+		}
+		a.theme = theme
+		a.keys.SetSetting("theme", theme.Name)
+		a.openSettings()
+	})
+	a.dialog.Selected = selected
 }
 
 func sortLabel(mode vfs.SortMode) string {

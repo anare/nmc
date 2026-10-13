@@ -114,11 +114,11 @@ func TestEntryStyleLayersMarkAndCursor(t *testing.T) {
 	theme := DefaultTheme()
 	entry := vfs.Entry{Name: "main.go"}
 	fg, bg, _ := theme.EntryStyle(entry, false, true).Decompose()
-	if fg != tcell.ColorBlack || bg != tcell.NewRGBColor(0, 170, 255) {
+	if fg != tcell.ColorBlack || bg != tcell.NewRGBColor(0, 170, 170) {
 		t.Fatalf("cursor style = (%v, %v), want black on cyan", fg, bg)
 	}
 	fg, bg, _ = theme.EntryStyle(entry, true, true).Decompose()
-	if fg != tcell.ColorYellow || bg != tcell.NewRGBColor(0, 170, 255) {
+	if fg != tcell.ColorYellow || bg != tcell.NewRGBColor(0, 170, 170) {
 		t.Fatalf("marked cursor style = (%v, %v), want yellow on cyan", fg, bg)
 	}
 }

@@ -94,6 +94,9 @@ These screens have keys of their own, handled before the keymap:
 **Git history** — `Enter`/`F3` diff, `F4`/`a` whole commit, `F5`/`c`
 commit, `F6`/`b` branch, `q`/`Esc`/`F10` back.
 
+**Settings** — choose `Theme` to switch between Midnight Commander, Dark, and
+Light palettes. Save with **Save all settings**.
+
 **Shortcuts** — `Enter` bind, `Del` unbind, `Ctrl-R`/`r` one default, `d`
 all defaults, `F2`/`Esc`/`q` save and leave.
 
