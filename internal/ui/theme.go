@@ -74,6 +74,9 @@ func makeTheme(name string, background, panel, dialog, accent, selectionFG tcell
 	}
 	bold := func(color tcell.Color) tcell.Style { return base(color).Bold(true) }
 	white := tcell.ColorWhite
+	buttonFG := tcell.ColorBlack
+	buttonBG := tcell.NewRGBColor(0, 170, 170)
+	hotkeyFG := tcell.ColorYellow
 	yellow := tcell.ColorYellow
 	green := tcell.ColorGreen
 	red := tcell.ColorRed
@@ -82,13 +85,21 @@ func makeTheme(name string, background, panel, dialog, accent, selectionFG tcell
 	silver := tcell.ColorSilver
 	if name == ThemeLight {
 		white = tcell.NewRGBColor(35, 42, 54)
+		buttonFG = tcell.ColorWhite
+		buttonBG = tcell.NewRGBColor(25, 65, 125)
+		hotkeyFG = tcell.ColorYellow
 		yellow = tcell.NewRGBColor(145, 85, 0)
 		green = tcell.NewRGBColor(0, 110, 55)
 		red = tcell.NewRGBColor(170, 25, 25)
 		cyan = tcell.NewRGBColor(0, 105, 145)
 		magenta = tcell.NewRGBColor(130, 35, 145)
 		silver = tcell.NewRGBColor(70, 78, 90)
+	} else if name == ThemeDark {
+		buttonFG = tcell.ColorWhite
+		buttonBG = tcell.NewRGBColor(70, 80, 100)
+		hotkeyFG = tcell.NewRGBColor(255, 220, 100)
 	}
+	button := tcell.StyleDefault.Foreground(buttonFG).Background(buttonBG)
 	return Theme{
 		Name:       name,
 		Background: tcell.StyleDefault.Background(background).Foreground(white),
@@ -100,6 +111,9 @@ func makeTheme(name string, background, panel, dialog, accent, selectionFG tcell
 		Marked:     base(yellow).Bold(true),
 		HintKey:    base(yellow).Bold(true),
 		HintLabel:  base(white),
+		HintBar:    tcell.StyleDefault.Foreground(white).Background(panel),
+		HintButton: button,
+		HintHotkey: button.Foreground(hotkeyFG).Bold(true),
 		Directory:  bold(white),
 		Executable: bold(green),
 		Symlink:    base(cyan),

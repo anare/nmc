@@ -136,6 +136,23 @@ func TestHintBarFillsTheRequestedWidth(t *testing.T) {
 	}
 }
 
+func TestHintBarHighlightsFunctionKeyButtons(t *testing.T) {
+	screen := newScreen(t, 40, 1)
+	var labels [10]string
+	labels[0] = "Help"
+	theme := DefaultTheme()
+	DrawHintBar(screen, 0, 40, theme, labels)
+	_, _, keyStyle, _ := screen.GetContent(0, 0)
+	_, _, labelStyle, _ := screen.GetContent(1, 0)
+	_, keyBG, _ := keyStyle.Decompose()
+	_, labelBG, _ := labelStyle.Decompose()
+	_, barBG, _ := theme.HintBar.Decompose()
+	_, buttonBG, _ := theme.HintButton.Decompose()
+	if keyBG != buttonBG || labelBG != buttonBG || barBG == buttonBG {
+		t.Fatalf("keybar backgrounds key=%v label=%v bar=%v button=%v", keyBG, labelBG, barBG, buttonBG)
+	}
+}
+
 func newScreen(t *testing.T, width, height int) tcell.SimulationScreen {
 	t.Helper()
 	screen := tcell.NewSimulationScreen("UTF-8")

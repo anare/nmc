@@ -47,6 +47,7 @@ type App struct {
 	quickSearching              bool
 	quickQuery                  string
 	quickMatch                  bool
+	editorSearchQuery           string
 	dialog                      *dialog.Dialog
 	cmd                         *dialog.TextInput
 	output                      *shell.Buffer
@@ -469,6 +470,7 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 		a.handleShellKey(event)
 		return
 	}
+	event = functionKeyAlias(event)
 	if a.findState != nil {
 		if action, ok := a.keys.Lookup(keymap.Find, event); ok {
 			a.dispatchFindAction(action)
@@ -602,6 +604,20 @@ func (a *App) HandleKey(event *tcell.EventKey) {
 			a.cmd.HandleKey(event)
 		}
 	}
+}
+
+func functionKeyAlias(event *tcell.EventKey) *tcell.EventKey {
+	if event.Key() != tcell.KeyRune || event.Modifiers()&tcell.ModAlt == 0 {
+		return event
+	}
+	r := event.Rune()
+	if r >= '1' && r <= '9' {
+		return tcell.NewEventKey(tcell.KeyF1+tcell.Key(r-'1'), 0, tcell.ModNone)
+	}
+	if r == '0' {
+		return tcell.NewEventKey(tcell.KeyF10, 0, tcell.ModNone)
+	}
+	return event
 }
 
 func (a *App) dispatchPanelAction(action string) {
@@ -1799,11 +1815,18 @@ func (a *App) dispatchEditorAction(action string) {
 	case "editor-quit":
 		a.closeEditor()
 	case "editor-search":
-		a.dialog = dialog.NewInput("Search", "Pattern: ", "", func(result dialog.Result) {
+		a.dialog = dialog.NewInput("Search", "Pattern: ", a.editorSearchQuery, func(result dialog.Result) {
 			if result.OK() && result.Text != "" {
-				e.Search(result.Text)
+				a.editorSearchQuery = result.Text
+				if !e.Search(result.Text) {
+					a.status = "Search: no match"
+				}
 			}
 		})
+	case "editor-search-next":
+		a.repeatEditorSearch(false)
+	case "editor-search-prev":
+		a.repeatEditorSearch(true)
 	case "editor-goto":
 		a.dialog = dialog.NewInput("Go to line", "Line: ", fmt.Sprint(e.Y+1), func(result dialog.Result) {
 			if result.OK() {
@@ -1878,6 +1901,24 @@ func (a *App) closeEditor() {
 			a.finishEditor()
 		}
 	})
+}
+
+func (a *App) repeatEditorSearch(reverse bool) {
+	if a.editorSearchQuery == "" {
+		a.status = "Search for a pattern first"
+		return
+	}
+	found := false
+	if reverse {
+		found = a.editor.SearchPrevious(a.editorSearchQuery)
+	} else {
+		found = a.editor.Search(a.editorSearchQuery)
+	}
+	if !found {
+		a.status = "Search: no match"
+		return
+	}
+	a.status = ""
 }
 
 func (a *App) finishEditor() {
@@ -2193,6 +2234,8 @@ func (a *App) closeFind() {
 }
 
 func (a *App) handleViewerKey(event *tcell.EventKey) {
+	_, screenHeight := a.screen.Size()
+	pageRows := max(1, screenHeight-4)
 	switch event.Key() {
 	case tcell.KeyEscape:
 		a.viewer = nil
@@ -2201,9 +2244,13 @@ func (a *App) handleViewerKey(event *tcell.EventKey) {
 	case tcell.KeyDown:
 		a.viewer.Top++
 	case tcell.KeyPgUp:
-		a.viewer.Top = max(0, a.viewer.Top-10)
+		a.viewer.Top = max(0, a.viewer.Top-pageRows)
 	case tcell.KeyPgDn:
-		a.viewer.Top += 10
+		if a.viewer.Mode == viewer.HexMode {
+			a.viewer.Top = min(max(0, (len(a.viewer.Data)-1)/16), a.viewer.Top+pageRows)
+		} else {
+			a.viewer.Top = min(max(0, len(a.viewer.Lines)-1), a.viewer.Top+pageRows)
+		}
 	case tcell.KeyHome:
 		a.viewer.Goto(1)
 	case tcell.KeyEnd:

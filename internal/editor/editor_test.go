@@ -35,6 +35,38 @@ func TestDrawScrollsVerticallyToKeepCursorVisible(t *testing.T) {
 	}
 }
 
+func TestPageKeysMoveEditorCursorByVisibleRows(t *testing.T) {
+	editor := FromBytes("long.txt", []byte(strings.Repeat("line\n", 30)))
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	screen.SetSize(40, 8)
+	editor.Draw(screen, ui.Rect{W: 40, H: 8}, ui.DefaultTheme())
+
+	if !editor.HandleKey(tcell.NewEventKey(tcell.KeyPgDn, 0, tcell.ModNone)) || editor.Y != 6 {
+		t.Fatalf("Page Down cursor line = %d, want 6", editor.Y)
+	}
+	if !editor.HandleKey(tcell.NewEventKey(tcell.KeyPgUp, 0, tcell.ModNone)) || editor.Y != 0 {
+		t.Fatalf("Page Up cursor line = %d, want 0", editor.Y)
+	}
+}
+
+func TestSearchPreviousWrapsAndFindsEarlierMatch(t *testing.T) {
+	editor := FromBytes("search.txt", []byte("cat one\ncat two\ncat three"))
+	editor.Y, editor.X = 2, 0
+	if !editor.SearchPrevious("cat") || editor.Y != 1 || editor.X != 0 {
+		t.Fatalf("previous match position = (%d,%d), want (1,0)", editor.Y, editor.X)
+	}
+	if !editor.SearchPrevious("cat") || editor.Y != 0 || editor.X != 0 {
+		t.Fatalf("wrapped previous match position = (%d,%d), want (0,0)", editor.Y, editor.X)
+	}
+	if !editor.SearchPrevious("cat") || editor.Y != 2 || editor.X != 0 {
+		t.Fatalf("reverse wrap position = (%d,%d), want (2,0)", editor.Y, editor.X)
+	}
+}
+
 func TestTypingRunIsOneUndoStepAndRedoRestoresIt(t *testing.T) {
 	editor := FromBytes("notes.txt", []byte("ab"))
 	editor.X = 1

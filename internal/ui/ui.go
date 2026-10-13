@@ -247,6 +247,9 @@ type Theme struct {
 	Marked     tcell.Style
 	HintKey    tcell.Style
 	HintLabel  tcell.Style
+	HintBar    tcell.Style
+	HintButton tcell.Style
+	HintHotkey tcell.Style
 	Directory  tcell.Style
 	Executable tcell.Style
 	Symlink    tcell.Style
@@ -311,6 +314,7 @@ func DrawHintBar(s tcell.Screen, y, width int, theme Theme, labels [10]string) {
 	if width <= 0 {
 		return
 	}
+	Fill(s, Rect{X: 0, Y: y, W: width, H: 1}, theme.HintBar)
 	base, extra := width/len(labels), width%len(labels)
 	x := 0
 	for i, label := range labels {
@@ -325,8 +329,16 @@ func DrawHintBar(s tcell.Screen, y, width int, theme Theme, labels [10]string) {
 		if i == 9 {
 			key = "0"
 		}
-		keyWidth := Text(s, x, y, min(slot, 2), key, theme.HintKey)
-		TextPadded(s, x+keyWidth, y, slot-keyWidth, label, theme.HintLabel)
+		buttonStyle := theme.HintButton
+		if label == "" {
+			buttonStyle = theme.HintBar
+		}
+		keyStyle := theme.HintHotkey
+		if label == "" {
+			keyStyle = theme.HintBar
+		}
+		keyWidth := Text(s, x, y, min(slot, 2), key, keyStyle)
+		TextPadded(s, x+keyWidth, y, slot-keyWidth, label, buttonStyle)
 		x += slot
 	}
 }

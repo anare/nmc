@@ -66,6 +66,8 @@ anything is typed it is a space again.
 | `F2` `Ctrl-S` | save | `editor-save` |
 | `F10` `F3` `Ctrl-Q` | quit | `editor-quit` |
 | `F7` | search | `editor-search` |
+| `F6` | next search match | `editor-search-next` |
+| `Shift-F6` | previous search match | `editor-search-prev` |
 | `F5` | go to a line | `editor-goto` |
 | `F8` | delete the line | `editor-delete-line` |
 | `Ctrl-Z` | undo | `editor-undo` |
@@ -108,8 +110,8 @@ all defaults, `F2`/`Esc`/`q` save and leave.
 
 | | |
 | --- | --- |
-| `Esc 1`…`Esc 9` | F1–F9 |
-| `Esc 0` | F10 |
+| `Esc 1`…`Esc 9` | F1–F9 (terminal Alt-number encoding) |
+| `Esc 0` | F10 (terminal Alt-number encoding) |
 | `Esc x` | Alt-x, for any letter |
 | `Esc Esc` | cancel; leave the viewer or editor |
 | `Ctrl-X s` | symbolic link |

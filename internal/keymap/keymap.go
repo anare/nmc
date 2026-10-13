@@ -81,6 +81,8 @@ var Defaults = []Action{
 	{"editor-save", Editor, "Save", []string{"F2", "Ctrl-S"}},
 	{"editor-quit", Editor, "Quit", []string{"F10", "F3", "Ctrl-Q"}},
 	{"editor-search", Editor, "Search", []string{"F7"}},
+	{"editor-search-next", Editor, "Next search match", []string{"F6"}},
+	{"editor-search-prev", Editor, "Previous search match", []string{"Shift-F6"}},
 	{"editor-goto", Editor, "Go to line", []string{"F5"}},
 	{"editor-delete-line", Editor, "Delete line", []string{"F8"}},
 	{"editor-undo", Editor, "Undo", []string{"Ctrl-Z"}},

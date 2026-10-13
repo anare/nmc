@@ -347,6 +347,59 @@ func TestFunctionKeyHintsFollowCurrentBindings(t *testing.T) {
 	}
 }
 
+func TestEscapeNumberSequencesAliasFunctionKeys(t *testing.T) {
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyRune, '1', tcell.ModAlt))
+	if a.dialog == nil || a.dialog.Title != "Shortcuts" {
+		t.Fatalf("ESC-1 alias did not invoke F1 help: %#v", a.dialog)
+	}
+
+	b, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.HandleKey(tcell.NewEventKey(tcell.KeyRune, '0', tcell.ModAlt))
+	if !b.quit {
+		t.Fatal("ESC-0 alias did not invoke F10 quit")
+	}
+}
+
+func TestViewerPageKeysScrollByScreenHeight(t *testing.T) {
+	a, err := New(newTestScreen(t, 80, 12), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.viewer = viewer.FromBytes("pages.txt", []byte(strings.Repeat("line\n", 30)))
+	a.HandleKey(tcell.NewEventKey(tcell.KeyPgDn, 0, tcell.ModNone))
+	if a.viewer.Top != 8 {
+		t.Fatalf("Page Down top = %d, want 8", a.viewer.Top)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyPgUp, 0, tcell.ModNone))
+	if a.viewer.Top != 0 {
+		t.Fatalf("Page Up top = %d, want 0", a.viewer.Top)
+	}
+}
+
+func TestEditorRepeatSearchActionsFindNextAndPrevious(t *testing.T) {
+	a, err := New(newTestScreen(t, 80, 24), vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.editor = editor.FromBytes("search.txt", []byte("cat first\ncat second\ncat third"))
+	a.editorSearchQuery = "cat"
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF6, 0, tcell.ModNone))
+	if a.editor.Y != 1 {
+		t.Fatalf("F6 next match line = %d, want 1", a.editor.Y)
+	}
+	a.HandleKey(tcell.NewEventKey(tcell.KeyF18, 0, tcell.ModNone))
+	if a.editor.Y != 0 {
+		t.Fatalf("Shift-F6 previous match line = %d, want 0", a.editor.Y)
+	}
+}
+
 func TestF2SettingsPersistHiddenFilePreference(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

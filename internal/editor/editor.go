@@ -40,6 +40,7 @@ type Editor struct {
 	Lines          [][]rune
 	X, Y           int
 	Top, Left      int
+	visibleRows    int
 	LineNumber     bool
 	Binary         bool
 	Changed        bool
@@ -319,6 +320,29 @@ func (e *Editor) Search(query string) bool {
 	return false
 }
 
+func (e *Editor) SearchPrevious(query string) bool {
+	if query == "" || len(e.Lines) == 0 {
+		return false
+	}
+	startY, startX := e.Y, e.X
+	needle := []rune(query)
+	for offset := 0; offset < len(e.Lines); offset++ {
+		y := (startY - offset + len(e.Lines)) % len(e.Lines)
+		line := e.Lines[y]
+		from := len(line) - len(needle)
+		if y == startY {
+			from = min(startX-1, from)
+		}
+		for x := from; x >= 0; x-- {
+			if x+len(needle) <= len(line) && strings.EqualFold(string(line[x:x+len(needle)]), query) {
+				e.X, e.Y = x, y
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (e *Editor) StartSelection() {
 	position := Position{X: e.X, Y: e.Y}
 	e.selectionStart = &position
@@ -493,6 +517,12 @@ func (e *Editor) HandleKey(event *tcell.EventKey) bool {
 	case tcell.KeyDown:
 		e.coalescing = false
 		e.Y = min(len(e.Lines)-1, e.Y+1)
+	case tcell.KeyPgUp:
+		e.coalescing = false
+		e.Y = max(0, e.Y-max(1, e.visibleRows))
+	case tcell.KeyPgDn:
+		e.coalescing = false
+		e.Y = min(len(e.Lines)-1, e.Y+max(1, e.visibleRows))
 	case tcell.KeyHome, tcell.KeyCtrlA:
 		e.coalescing = false
 		e.X = 0
@@ -563,6 +593,7 @@ func (e *Editor) Draw(screen tcell.Screen, rect ui.Rect, theme ui.Theme) {
 		return
 	}
 	rows := max(0, rect.H-2)
+	e.visibleRows = rows
 	e.keepCursorVisible(rows)
 	ui.Fill(screen, rect, theme.Background)
 	ui.DrawBox(screen, rect, ui.Double, theme.Border)
