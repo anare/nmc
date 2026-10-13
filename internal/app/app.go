@@ -1999,6 +1999,8 @@ type findState struct {
 	options   find.Options
 	hits      []find.Hit
 	selected  int
+	top       int
+	rows      int
 	searching bool
 	cancel    context.CancelFunc
 	err       error
@@ -2046,15 +2048,27 @@ func (a *App) drawFind(width, height int) {
 	}
 	ui.TextPadded(a.screen, 0, 0, width, title, a.theme.Border)
 	ui.TextRight(a.screen, 0, 0, width, state, a.theme.HintLabel)
-	rows := height - 2
-	start := max(0, len(a.findState.hits)-rows)
-	for row, hit := range a.findState.hits[start:] {
+	rows := max(0, height-3)
+	a.findState.rows = rows
+	if rows > 0 && len(a.findState.hits) > 0 {
+		a.findState.selected = min(max(0, a.findState.selected), len(a.findState.hits)-1)
+		if a.findState.selected < a.findState.top {
+			a.findState.top = a.findState.selected
+		} else if a.findState.selected >= a.findState.top+rows {
+			a.findState.top = a.findState.selected - rows + 1
+		}
+		a.findState.top = min(max(0, a.findState.top), max(0, len(a.findState.hits)-rows))
+	} else {
+		a.findState.top = 0
+	}
+	for row := 0; row < rows && a.findState.top+row < len(a.findState.hits); row++ {
+		hit := a.findState.hits[a.findState.top+row]
 		label := hit.Path
 		if hit.Line > 0 {
 			label = fmt.Sprintf("%s:%d: %s", hit.Path, hit.Line, hit.Text)
 		}
 		style := a.theme.Panel
-		if row+start == a.findState.selected {
+		if row+a.findState.top == a.findState.selected {
 			style = a.theme.Selection
 		}
 		ui.TextPadded(a.screen, 0, row+1, width, label, style)
@@ -2071,6 +2085,10 @@ func (a *App) handleFindKey(event *tcell.EventKey) {
 		a.findState.selected = max(0, a.findState.selected-1)
 	case tcell.KeyDown:
 		a.findState.selected = min(max(0, len(a.findState.hits)-1), a.findState.selected+1)
+	case tcell.KeyPgUp:
+		a.findState.selected = max(0, a.findState.selected-max(1, a.findState.rows))
+	case tcell.KeyPgDn:
+		a.findState.selected = min(max(0, len(a.findState.hits)-1), a.findState.selected+max(1, a.findState.rows))
 	}
 }
 

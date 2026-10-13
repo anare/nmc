@@ -562,6 +562,8 @@ func (e *Editor) Draw(screen tcell.Screen, rect ui.Rect, theme ui.Theme) {
 	if rect.W <= 0 || rect.H <= 0 {
 		return
 	}
+	rows := max(0, rect.H-2)
+	e.keepCursorVisible(rows)
 	ui.Fill(screen, rect, theme.Background)
 	ui.DrawBox(screen, rect, ui.Double, theme.Border)
 	title := e.Path
@@ -573,7 +575,6 @@ func (e *Editor) Draw(screen tcell.Screen, rect ui.Rect, theme ui.Theme) {
 	if e.LineNumber {
 		numberWidth = len(fmt.Sprint(len(e.Lines))) + 1
 	}
-	rows := max(0, rect.H-2)
 	for row := 0; row < rows; row++ {
 		lineIndex := e.Top + row
 		if lineIndex >= len(e.Lines) {
@@ -603,6 +604,20 @@ func (e *Editor) Draw(screen tcell.Screen, rect ui.Rect, theme ui.Theme) {
 			screen.SetContent(rect.X+1+numberWidth+cell, rect.Y+1+cursorRow, ' ', nil, theme.Selection)
 		}
 	}
+}
+
+func (e *Editor) keepCursorVisible(rows int) {
+	if rows <= 0 {
+		return
+	}
+	maxTop := max(0, len(e.Lines)-rows)
+	e.Top = min(max(0, e.Top), maxTop)
+	if e.Y < e.Top {
+		e.Top = e.Y
+	} else if e.Y >= e.Top+rows {
+		e.Top = e.Y - rows + 1
+	}
+	e.Top = min(max(0, e.Top), maxTop)
 }
 
 func (e *Editor) drawSelection(screen tcell.Screen, rect ui.Rect, numberWidth int) {

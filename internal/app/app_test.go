@@ -3,6 +3,7 @@ package app
 import (
 	"archive/zip"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/anare/nmc/internal/dialog"
 	"github.com/anare/nmc/internal/editor"
+	"github.com/anare/nmc/internal/find"
 	"github.com/anare/nmc/internal/git"
 	"github.com/anare/nmc/internal/history"
 	"github.com/anare/nmc/internal/keymap"
@@ -115,6 +117,29 @@ func TestPanelKeymapSwapsPanelsAndQuickSearchSelectsEntries(t *testing.T) {
 	a.HandleKey(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
 	if a.quickSearching {
 		t.Fatal("Escape did not leave quick search")
+	}
+}
+
+func TestFindResultsScrollWithTheSelectedHit(t *testing.T) {
+	screen := newTestScreen(t, 80, 10)
+	a, err := New(screen, vfs.NewMemFS("test"), "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := make([]find.Hit, 30)
+	for index := range hits {
+		hits[index].Path = fmt.Sprintf("file-%02d", index)
+	}
+	a.findState = &findState{options: find.Options{NamePattern: "*"}, hits: hits}
+	for range 15 {
+		a.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	}
+	a.Draw()
+	if a.findState.selected != 15 || a.findState.selected < a.findState.top || a.findState.selected >= a.findState.top+a.findState.rows {
+		t.Fatalf("selected hit %d outside visible range %d..%d", a.findState.selected, a.findState.top, a.findState.top+a.findState.rows)
+	}
+	if !strings.Contains(screenText(screen), hits[a.findState.selected].Path) {
+		t.Fatalf("selected hit %q is missing from find results", hits[a.findState.selected].Path)
 	}
 }
 

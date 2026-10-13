@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -149,10 +150,101 @@ func TestPickerFiltersByWholeTypedQuery(t *testing.T) {
 	}
 }
 
+func TestPickerAndMenuScrollSelectedItemsIntoView(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	screen.SetSize(60, 10)
+
+	items := make([]string, 30)
+	for index := range items {
+		items[index] = fmt.Sprintf("item-%02d", index)
+	}
+	for _, picker := range []*Dialog{NewPicker("Choose", items, nil), NewMenu("Menu", items, nil)} {
+		for range 21 {
+			picker.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+		}
+		screen.Clear()
+		picker.Draw(screen, ui.DefaultTheme())
+		if picker.Selected < picker.Offset || picker.Selected >= picker.Offset+picker.visibleRows {
+			t.Fatalf("selected item %d outside visible range %d..%d", picker.Selected, picker.Offset, picker.Offset+picker.visibleRows)
+		}
+		if !strings.Contains(dialogScreenText(screen), items[picker.Selected]) {
+			t.Fatalf("selected item %q is missing from the rendered menu", items[picker.Selected])
+		}
+	}
+}
+
+func TestComboHistoryScrollsSelectedItemIntoView(t *testing.T) {
+	store, err := history.Open(t.TempDir() + "/history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range 20 {
+		store.Add(history.Host, fmt.Sprintf("host-%02d", index))
+	}
+	d := NewComboInput("Connect", "Host: ", "", store.Cursor(history.Host), nil)
+	d.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	for range 12 {
+		d.HandleKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	}
+
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	screen.SetSize(60, 10)
+	d.Draw(screen, ui.DefaultTheme())
+	if d.ComboSelected < d.ComboOffset || d.ComboSelected >= d.ComboOffset+d.visibleRows {
+		t.Fatalf("combo selection %d outside visible range %d..%d", d.ComboSelected, d.ComboOffset, d.ComboOffset+d.visibleRows)
+	}
+	if !strings.Contains(dialogScreenText(screen), d.ComboItems[d.ComboSelected]) {
+		t.Fatalf("selected history item %q is missing from the rendered dropdown", d.ComboItems[d.ComboSelected])
+	}
+}
+
+func TestListDialogPagesThroughVisibleRows(t *testing.T) {
+	lines := make([]string, 20)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("line-%02d", index)
+	}
+	d := NewList("Output", lines)
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	screen.SetSize(60, 10)
+	d.Draw(screen, ui.DefaultTheme())
+	d.HandleKey(tcell.NewEventKey(tcell.KeyPgDn, 0, tcell.ModNone))
+	screen.Clear()
+	d.Draw(screen, ui.DefaultTheme())
+	if d.Offset != 3 || !strings.Contains(dialogScreenText(screen), "line-03") {
+		t.Fatalf("paged list offset=%d rendered=%q", d.Offset, dialogScreenText(screen))
+	}
+}
+
 func TestWrapFitsEveryResultWithinWidth(t *testing.T) {
 	for _, line := range Wrap("a long message with界wide text", 8) {
 		if displayWidth(line) > 8 {
 			t.Fatalf("wrapped line %q has width %d", line, displayWidth(line))
 		}
 	}
+}
+
+func dialogScreenText(screen tcell.SimulationScreen) string {
+	width, height := screen.Size()
+	var result strings.Builder
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			r, _, _, _ := screen.GetContent(x, y)
+			if r != 0 {
+				result.WriteRune(r)
+			}
+		}
+	}
+	return result.String()
 }

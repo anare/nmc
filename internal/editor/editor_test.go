@@ -5,10 +5,35 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/anare/nmc/internal/ui"
 	"github.com/anare/nmc/internal/vfs"
+	"github.com/gdamore/tcell/v2"
 )
+
+func TestDrawScrollsVerticallyToKeepCursorVisible(t *testing.T) {
+	editor := FromBytes("long.txt", []byte(strings.Repeat("line\n", 20)))
+	editor.Y = 12
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	screen.SetSize(40, 8)
+
+	editor.Draw(screen, ui.Rect{W: 40, H: 8}, ui.DefaultTheme())
+	if editor.Top != 7 {
+		t.Fatalf("top visible line = %d, want 7", editor.Top)
+	}
+	_, _, style, _ := screen.GetContent(1, 6)
+	_, want, _ := ui.DefaultTheme().Selection.Decompose()
+	_, got, _ := style.Decompose()
+	if got != want {
+		t.Fatalf("cursor row background = %v, want selection background %v", got, want)
+	}
+}
 
 func TestTypingRunIsOneUndoStepAndRedoRestoresIt(t *testing.T) {
 	editor := FromBytes("notes.txt", []byte("ab"))
