@@ -114,6 +114,7 @@ ordinary bindings; it is unmodified movement that is structural.
 hidden-files           = on
 line-numbers           = off
 sort-order             = Extension
+theme                  = midnight-commander
 
 [panel]
 copy                   = Ctrl-G
@@ -149,8 +150,12 @@ Settings
   Show hidden files: off
   Sort order: Name
   Line numbers when viewing and editing: off
+  Theme: Midnight Commander
   Save all settings to ~/.bcrc
 ```
+
+Built-in color themes are Midnight Commander (the default), Dark, and Light.
+Changing the theme applies immediately; **Save all settings** persists it.
 
 Toggles **carry their current value in the label** — a settings list that
 does not say what a setting *is* makes you open it to find out — and

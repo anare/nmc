@@ -66,6 +66,8 @@ anything is typed it is a space again.
 | `F2` `Ctrl-S` | save | `editor-save` |
 | `F10` `F3` `Ctrl-Q` | quit | `editor-quit` |
 | `F7` | search | `editor-search` |
+| `F6` | next search match | `editor-search-next` |
+| `Shift-F6` | previous search match | `editor-search-prev` |
 | `F5` | go to a line | `editor-goto` |
 | `F8` | delete the line | `editor-delete-line` |
 | `Ctrl-Z` | undo | `editor-undo` |
@@ -94,17 +96,22 @@ These screens have keys of their own, handled before the keymap:
 **Git history** — `Enter`/`F3` diff, `F4`/`a` whole commit, `F5`/`c`
 commit, `F6`/`b` branch, `q`/`Esc`/`F10` back.
 
+**Settings** — choose `Theme` to switch between Midnight Commander, Dark, and
+Light palettes. Save with **Save all settings**.
+
 **Shortcuts** — `Enter` bind, `Del` unbind, `Ctrl-R`/`r` one default, `d`
 all defaults, `F2`/`Esc`/`q` save and leave.
 
 **Key tester** — every key is recorded; `Esc Esc` leaves.
 
+**History browser** — `Ctrl-D` forgets the selected command.
+
 ## Prefixes
 
 | | |
 | --- | --- |
-| `Esc 1`…`Esc 9` | F1–F9 |
-| `Esc 0` | F10 |
+| `Esc 1`…`Esc 9` | F1–F9 (terminal Alt-number encoding) |
+| `Esc 0` | F10 (terminal Alt-number encoding) |
 | `Esc x` | Alt-x, for any letter |
 | `Esc Esc` | cancel; leave the viewer or editor |
 | `Ctrl-X s` | symbolic link |

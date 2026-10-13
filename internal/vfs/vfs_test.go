@@ -8,6 +8,110 @@ import (
 	"testing"
 )
 
+func TestCachedFilesystemReturnsCopiesAndInvalidatesAfterWrites(t *testing.T) {
+	ctx := context.Background()
+	mem := NewMemFS("remote")
+	mem.PutFile("/note.txt", []byte("old"), 0o644)
+	cached := NewCached(mem)
+	entries, err := cached.List(ctx, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries[0].Name = "mutated"
+	mem.PutFile("/another.txt", []byte("new"), 0o644)
+	entries, err = cached.List(ctx, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "note.txt" {
+		t.Fatalf("cached listing was mutated or unexpectedly refreshed: %+v", entries)
+	}
+	if err := cached.Mkdir(ctx, "/folder"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = cached.List(ctx, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("listing after write has %d entries, want 3", len(entries))
+	}
+}
+
+func TestCachedFilesystemCachesSmallContentAndInvalidates(t *testing.T) {
+	ctx := context.Background()
+	mem := NewMemFS("remote")
+	mem.PutFile("/note.txt", []byte("old"), 0o644)
+	cached := NewCached(mem)
+	read := func() string {
+		t.Helper()
+		reader, err := cached.Open(ctx, "/note.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	if got := read(); got != "old" {
+		t.Fatalf("initial content = %q", got)
+	}
+	mem.PutFile("/note.txt", []byte("new"), 0o644)
+	if got := read(); got != "old" {
+		t.Fatalf("cached content = %q, want old snapshot", got)
+	}
+	writer, err := cached.Create(ctx, "/note.txt", 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("newer")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got != "newer" {
+		t.Fatalf("content after cached write = %q", got)
+	}
+}
+
+func TestCachedFilesystemReconnectInvalidatesRemoteListings(t *testing.T) {
+	ctx := context.Background()
+	mem := NewMemFS("remote")
+	mem.PutFile("/before", nil, 0o644)
+	remote := &reconnectableFS{FS: mem}
+	cached := NewCached(remote)
+	if _, err := cached.List(ctx, "/"); err != nil {
+		t.Fatal(err)
+	}
+	mem.PutFile("/after", nil, 0o644)
+	if entries, err := cached.List(ctx, "/"); err != nil || len(entries) != 1 {
+		t.Fatalf("cached listing before reconnect = %+v err=%v", entries, err)
+	}
+	if err := cached.Reconnect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if remote.reconnects != 1 {
+		t.Fatalf("reconnect calls = %d", remote.reconnects)
+	}
+	if entries, err := cached.List(ctx, "/"); err != nil || len(entries) != 2 {
+		t.Fatalf("listing after reconnect = %+v err=%v", entries, err)
+	}
+}
+
+type reconnectableFS struct {
+	FS
+	reconnects int
+}
+
+func (fs *reconnectableFS) Reconnect(context.Context) error {
+	fs.reconnects++
+	return nil
+}
+
 func TestLocalFilesystemListsParentAndSymlinkMetadata(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

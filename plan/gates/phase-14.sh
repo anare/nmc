@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$NMC_ROOT/plan/gate-lib.sh"
+need_file internal/handlers/handlers.go
+need_file internal/archivefs/fs.go
+need_tests ./internal/editor 'TestBinaryModeRoundTripsEveryByteExactly|TestBinarySelectionAndPastePreserveAllByteValues'
+need_tests ./internal/handlers 'TestHandlerPathsArePassedThroughEnvironment|TestResolvePrefersSpecificityThenUserHandlers'
+need_tests ./internal/archivefs 'TestFilesystemRejectsSymlinkExtractionAndMutations|TestDefaultZipHandlerReadsARealArchive'
+need_tests ./internal/app 'TestArchiveEnterF3ListingAndRootExit|TestF5CopiesARealZipMemberOutOfArchive|TestF3UsesNamedOpenHandlerAndFallsBackWhenMissing'
+need_build
+need_suite
